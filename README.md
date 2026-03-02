@@ -18,11 +18,15 @@ FFmpeg 기반 비디오/오디오 변환 GUI 도구 (Python/Tkinter)
 - FFmpeg (PATH에 등록 또는 같은 폴더에 위치)
 - MediaInfo (선택사항)
 
-## 설치 및 실행
+## 설치
 
 ```bash
 pip install -r requirements.txt
-python vidgadget.py
+```
+
+## 실행
+```
+vidGadget.bat
 ```
 
 ## 사용법

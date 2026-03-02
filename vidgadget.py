@@ -11,6 +11,7 @@ import threading
 import os
 import sys
 import json
+import re
 
 _VERSION_STR = "1.42"
 # 드래그 앤 드롭 지원
@@ -71,6 +72,26 @@ INPUT_CODEC_LIST = [
     ("GIF", CODEC_GIF),
     ("WEBP", CODEC_WEBP),
 ]
+
+# 윈도우 파일이름 금지문자 /\:*?"<>|
+_UNSAFE_FILENAME_RE = re.compile('[/\\:*?"<>|]')  # [%! '&^` ？＂｜＊＜＞：／＼％！＇＆＾｀
+
+
+def _sanitize_path(filepath: str) -> str:
+    """파일명의 부적절한 문자를 _로 치환하여 영구 변경. 변경 불필요하거나 실패 시 원래 경로 반환."""
+    dirpath = os.path.dirname(filepath)
+    basename = os.path.basename(filepath)
+    safe_name = _UNSAFE_FILENAME_RE.sub("_", basename)
+    if safe_name == basename:
+        return filepath
+    safe_path = os.path.join(dirpath, safe_name)
+    try:
+        os.rename(filepath, safe_path)
+    except OSError:
+        if os.path.exists(safe_path):
+            return safe_path  # 이전에 이미 변경됨
+        return filepath
+    return safe_path
 
 
 class VidGadgetApp:
@@ -145,9 +166,7 @@ class VidGadgetApp:
         """프로젝트 초기화 작업"""
         print("start")
         test_files = [
-            r"D:\_Python\app\vidGadget\icon\Robot.Dreams.mp4",  # CFR
-            r"D:\_Python\app\vidGadget\icon\AVI003-VFR-stut.mp4",  # VFR
-            # r"D:\_Python\app\vidGadget\icon\AVS611-VFR-stut.mp4", # VFR
+            # r"D:\_Python\app\vidGadget\icon\Robot.Dreams.mp4",  # CFR
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):
@@ -1032,10 +1051,11 @@ class VidGadgetApp:
         """콘솔 창에서 명령 실행"""
         try:
             print(f"Running command: {cmd}")
-            if create_new_console == True:
+            if create_new_console:
                 subprocess.Popen(f"cmd /c {cmd}", creationflags=subprocess.CREATE_NEW_CONSOLE)
             else:
-                subprocess.run(f"cmd /c {cmd}", shell=True)
+                # cmd.exe를 거치면 한글 등 유니코드 인코딩이 깨지므로 직접 실행
+                subprocess.run(cmd)
 
             print(f"-------------------------------------\n명령 종료:\n {cmd}")
 

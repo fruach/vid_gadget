@@ -4,6 +4,7 @@ C++ CmdGet 함수 포팅
 """
 
 import os
+import re
 from typing import Optional
 from dataclasses import dataclass
 
@@ -147,8 +148,8 @@ class FFmpegCommandBuilder:
         # 최종 명령어 조합
         cmd = f'ffmpeg {video_codec_input} -y {range_start1} -i "{input_file}" {range_start2} {range_end} {video_cmd} {cfr_cmd} {audio_cmd} {sub_cmd} "{output_file}"'
 
-        # 불필요한 공백 제거
-        cmd = " ".join(cmd.split())
+        # 불필요한 공백 제거 (따옴표 안의 공백은 보존)
+        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else ' ', cmd)
         if add_pause:
             cmd += " & pause"
 
