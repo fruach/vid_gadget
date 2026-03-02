@@ -6,6 +6,7 @@ C++ MediaInfoGet, MediaInfoFileRead, MediaLineAnalyze 함수 포팅
 import os
 import subprocess
 import re
+import json
 from dataclasses import dataclass, field
 from typing import List, Optional
 import math
@@ -109,6 +110,7 @@ class MEDIA_INFO:
     width: int = 0
     height: int = 0
     frame_rate: float = 0.0
+    vfr: bool = False
     depth: int = 0
 
     # 오디오 정보
@@ -130,6 +132,7 @@ class MEDIA_INFO:
         self.width = 0
         self.height = 0
         self.frame_rate = 0.0
+        self.vfr = False
         self.depth = 0
         self.audio_tracks = []
         self.audio_count = 0
@@ -157,24 +160,36 @@ class MEDIA_INFO:
 
         # 전체 파일 정보
         size_mb = self.file_size / 1024 / 1024
-        lines.append(
-            f"전체 파일 용량={size_mb:.3f} MB, 길이={self.file_duration // 60}분 {self.file_duration % 60}초, [자막={self.sub_count}개]"
-        )
+        lines.append(f"[전체]")
+        lines.append(f"  파일 용량 : {size_mb:.3f} MB")
+        lines.append(f"  길이 : {self.file_duration // 60}분 {self.file_duration % 60}초")
+        lines.append(f"  자막 : {self.sub_count}개")
 
         # 비디오 정보
         vid_size_mb = self.size / 1024 / 1024
-        lines.append(
-            f"비디오 : 파일 용량={vid_size_mb:.3f} MB, 길이={self.duration // 60}분 {self.duration % 60}초, "
-            f"코덱={self.codec_name}, ({self.width} x {self.height}), 비트레이트={self.bitrate} kbps"
-        )
+        lines.append(f"")
+        lines.append(f"[비디오]")
+        lines.append(f"  파일 용량 : {vid_size_mb:.3f} MB")
+        lines.append(f"  길이 : {self.duration // 60}분 {self.duration % 60}초")
+        lines.append(f"  코덱 : {self.codec_name}")
+        lines.append(f"  해상도 : {self.width} x {self.height}")
+        lines.append(f"  비트레이트 : {self.bitrate} kbps")
+        lines.append(f"  프레임레이트 : {self.frame_rate} fps")
+        lines.append(f"  프레임모드 : {'VFR (가변)' if self.vfr else 'CFR (고정)'}")
+        if self.depth:
+            lines.append(f"  비트심도 : {self.depth}bit")
 
         # 오디오 정보
         for i, audio in enumerate(self.audio_tracks):
             audio_size_mb = audio.size / 1024 / 1024
-            lines.append(
-                f"오디오 ({i+1}) - 파일 용량={audio_size_mb:.3f} MB, 길이={self.duration // 60}분 {self.duration % 60}초, "
-                f"코덱={audio.codec_name}, 채널={audio.channel}, 비트레이트={audio.bitrate} kbps, 언어={audio.lang_name}"
-            )
+            lines.append(f"")
+            lines.append(f"[오디오 #{i+1}]")
+            lines.append(f"  파일 용량 : {audio_size_mb:.3f} MB")
+            lines.append(f"  코덱 : {audio.codec_name}")
+            lines.append(f"  채널 : {audio.channel}")
+            lines.append(f"  비트레이트 : {audio.bitrate} kbps")
+            if audio.lang_name:
+                lines.append(f"  언어 : {audio.lang_name}")
 
         return "\n".join(lines)
 
@@ -190,44 +205,27 @@ class MediaInfo:
     SEC_SUB = 30
 
     @staticmethod
-    def get_info(filename: str, app_path: str = "") -> Optional[MEDIA_INFO]:
-        """미디어 정보 획득"""
-        if not os.path.exists(filename):
-            print(f"{filename} 가 없습니다.")
-            return None
-
-        # mediainfo.exe 확인
+    def _parse_mediainfo_exe(filename: str, app_path: str = "") -> Optional[MEDIA_INFO]:
+        """mediainfo.exe를 사용한 파싱"""
         mediainfo_exe = "mediainfo"
         if app_path:
             mediainfo_path = os.path.join(app_path, "mediainfo.exe")
             if os.path.exists(mediainfo_path):
                 mediainfo_exe = mediainfo_path
 
-        # mediainfo 실행
         try:
             result = subprocess.run(
                 [mediainfo_exe, filename], capture_output=True, text=True, encoding="utf-8", errors="replace"
             )
-            output = result.stdout
+            info = MediaInfo._parse_mediainfo_output(result.stdout)
+            if info:
+                info.filename = filename
+            return info
         except FileNotFoundError:
-            # pymediainfo 시도
-            try:
-                from pymediainfo import MediaInfo as PyMediaInfo
-
-                return MediaInfo._parse_pymediainfo(filename)
-            except ImportError:
-                print("mediainfo.exe가 없습니다. pymediainfo를 설치하거나 mediainfo.exe를 설치하세요.")
-                return None
+            return None
         except Exception as e:
             print(f"MediaInfo 실행 오류: {e}")
             return None
-
-        # 파싱
-        info = MediaInfo._parse_mediainfo_output(output)
-        if info:
-            info.filename = filename
-
-        return info
 
     @staticmethod
     def _parse_mediainfo_output(output: str) -> Optional[MEDIA_INFO]:
@@ -357,6 +355,9 @@ class MediaInfo:
             match = re.search(r"([\d.]+)", value)
             if match:
                 info.frame_rate = float(match.group(1))
+        elif name_lower == "frame rate mode":
+            if "VARIABLE" in value_upper:
+                info.vfr = True
         elif name_lower == "width":
             info.width = MediaInfo._parse_number(value)
         elif name_lower == "height":
@@ -518,6 +519,11 @@ class MediaInfo:
                         info.frame_rate = float(track.frame_rate)
                     if track.bit_depth:
                         info.depth = int(track.bit_depth)
+                    if (
+                        getattr(track, "frame_rate_mode", None)
+                        and "variable" in str(track.frame_rate_mode).lower()
+                    ):
+                        info.vfr = True
 
                     # 코덱
                     codec = (track.codec_id or track.format or "").upper()
@@ -586,6 +592,195 @@ class MediaInfo:
         except Exception as e:
             print(f"pymediainfo 파싱 오류: {e}")
             return None
+
+    @staticmethod
+    def _parse_ffprobe(filename: str) -> Optional[MEDIA_INFO]:
+        """ffprobe를 사용한 파싱 (FFmpeg 포함)"""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v",
+                    "quiet",
+                    "-print_format",
+                    "json",
+                    "-show_format",
+                    "-show_streams",
+                    filename,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            data = json.loads(result.stdout)
+        except FileNotFoundError:
+            print("ffprobe를 찾을 수 없습니다. FFmpeg를 설치하세요.")
+            return None
+        except Exception as e:
+            print(f"ffprobe 실행 오류: {e}")
+            return None
+
+        info = MEDIA_INFO()
+        info.filename = filename
+
+        fmt = data.get("format", {})
+        if fmt.get("size"):
+            info.file_size = int(fmt["size"])
+        if fmt.get("duration"):
+            info.file_duration = int(float(fmt["duration"]))
+
+        codec_map = {
+            "h264": CODEC_AVC,
+            "avc": CODEC_AVC,
+            "hevc": CODEC_HEVC,
+            "h265": CODEC_HEVC,
+            "vp9": CODEC_VP9,
+            "vp8": CODEC_VP8,
+            "av1": CODEC_AV1,
+            "gif": CODEC_GIF,
+            "webp": CODEC_WEBP,
+            "xvid": CODEC_XVID,
+        }
+        audio_codec_map = {
+            "aac": A_CODEC_AAC,
+            "mp3": A_CODEC_MP3,
+            "ac3": A_CODEC_AC3,
+            "eac3": A_CODEC_AC3,
+            "dts": A_CODEC_DTS,
+            "vorbis": A_CODEC_OGG,
+            "opus": A_CODEC_OPUS,
+            "flac": A_CODEC_FLAC,
+            "pcm": A_CODEC_WAV,
+        }
+        lang_map = {
+            "kor": LANG_KOREAN,
+            "ko": LANG_KOREAN,
+            "eng": LANG_ENGLISH,
+            "en": LANG_ENGLISH,
+            "jpn": LANG_JAPANESE,
+            "ja": LANG_JAPANESE,
+            "chi": LANG_CHINESE,
+            "zh": LANG_CHINESE,
+            "spa": LANG_SPANISH,
+            "es": LANG_SPANISH,
+            "fre": LANG_FRENCH,
+            "fr": LANG_FRENCH,
+            "ita": LANG_ITALIAN,
+            "it": LANG_ITALIAN,
+            "ger": LANG_GERMAN,
+            "de": LANG_GERMAN,
+        }
+
+        for stream in data.get("streams", []):
+            codec_type = stream.get("codec_type", "")
+            codec_name = (stream.get("codec_name") or "").lower()
+
+            if codec_type == "video":
+                if stream.get("duration"):
+                    info.duration = int(float(stream["duration"]))
+                elif stream.get("tags", {}).get("DURATION"):
+                    info.duration = MediaInfo._parse_ffprobe_duration(stream["tags"]["DURATION"])
+                if not info.duration:
+                    info.duration = info.file_duration
+                if stream.get("bit_rate"):
+                    info.bitrate = int(stream["bit_rate"]) // 1000
+                info.width = int(stream.get("width", 0))
+                info.height = int(stream.get("height", 0))
+                if stream.get("r_frame_rate"):
+                    parts = stream["r_frame_rate"].split("/")
+                    if len(parts) == 2 and int(parts[1]) != 0:
+                        info.frame_rate = round(int(parts[0]) / int(parts[1]), 3)
+                if stream.get("bits_per_raw_sample"):
+                    info.depth = int(stream["bits_per_raw_sample"])
+
+                for key, val in codec_map.items():
+                    if key in codec_name:
+                        info.codec = val
+                        break
+
+                # 비디오 stream size 추정
+                if info.bitrate and info.duration:
+                    info.size = info.bitrate * 1000 * info.duration // 8
+
+            elif codec_type == "audio":
+                audio = AudioInfo()
+                if stream.get("duration"):
+                    audio.duration = int(float(stream["duration"]))
+                elif stream.get("tags", {}).get("DURATION"):
+                    audio.duration = MediaInfo._parse_ffprobe_duration(stream["tags"]["DURATION"])
+                if stream.get("bit_rate"):
+                    audio.bitrate = int(stream["bit_rate"]) // 1000
+                audio.channel = int(stream.get("channels", 0))
+
+                for key, val in audio_codec_map.items():
+                    if key in codec_name:
+                        audio.codec = val
+                        break
+
+                lang = (stream.get("tags", {}).get("language") or "").lower()
+                for key, val in lang_map.items():
+                    if key in lang:
+                        audio.lang = val
+                        break
+
+                # 오디오 stream size 추정
+                if audio.bitrate and audio.duration:
+                    audio.size = audio.bitrate * 1000 * audio.duration // 8
+
+                info.audio_tracks.append(audio)
+                info.audio_count += 1
+
+            elif codec_type == "subtitle":
+                info.sub_count += 1
+
+        # VFR 판단: 첫 30프레임의 duration 비교
+        info.vfr = MediaInfo._detect_vfr(filename)
+
+        return info
+
+    @staticmethod
+    def _detect_vfr(filename: str) -> bool:
+        """첫 30프레임의 packet duration으로 VFR 판단"""
+        try:
+            result = subprocess.run(
+                ["ffprobe", "-select_streams", "v:0", "-show_entries", "packet=duration_time",
+                 "-read_intervals", "%+#30", "-v", "quiet", "-of", "csv=p=0", filename],
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+            )
+            durations = {line.strip() for line in result.stdout.strip().split("\n") if line.strip()}
+            return len(durations) > 1
+        except Exception:
+            return False
+
+    @staticmethod
+    def _parse_ffprobe_duration(value: str) -> int:
+        """ffprobe DURATION 태그 파싱 (HH:MM:SS.xxx -> 초)"""
+        match = re.match(r"(\d+):(\d+):(\d+)", value)
+        if match:
+            return int(match.group(1)) * 3600 + int(match.group(2)) * 60 + int(match.group(3))
+        return 0
+
+    @staticmethod
+    def get_info(filename: str, app_path: str = "") -> Optional[MEDIA_INFO]:
+        """미디어 정보 획득"""
+        if not os.path.exists(filename):
+            print(f"{filename} 가 없습니다.")
+            return None
+
+        """ try:
+            from pymediainfo import MediaInfo as PyMediaInfo
+
+            ret = MediaInfo._parse_pymediainfo(filename)
+            print("pymediainfo result:", ret)
+            return ret
+        except ImportError:
+            pass
+        except Exception as e:
+            print(f"pymediainfo 파싱 오류: {e}") """
+
+        #  ffprobe 시도 (FFmpeg 필수 의존성)
+        return MediaInfo._parse_ffprobe(filename)
 
 
 if __name__ == "__main__":

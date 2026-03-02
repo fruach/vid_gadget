@@ -141,6 +141,22 @@ class VidGadgetApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.init_prj()
 
+    def init_prj(self):
+        """프로젝트 초기화 작업"""
+        print("start")
+        test_files = [
+            r"D:\_Python\app\vidGadget\icon\Robot.Dreams.mp4",  # CFR
+            r"D:\_Python\app\vidGadget\icon\AVI003-VFR-stut.mp4",  # VFR
+            # r"D:\_Python\app\vidGadget\icon\AVS611-VFR-stut.mp4", # VFR
+        ]
+        for test_file in test_files:
+            if os.path.isfile(test_file):
+                self.file_listbox.insert(tk.END, test_file)
+
+        if self.file_listbox.size() > 0:
+            self.file_listbox.selection_set(0)
+            self.file_listbox.event_generate("<<ListboxSelect>>")
+
     def _config_path(self):
         return os.path.join(self.app_path, "vidgadget_config.json")
 
@@ -158,6 +174,7 @@ class VidGadgetApp:
         geo = self.root.geometry()  # "WxH+X+Y"
         # parse "WxH+X+Y" or "WxH-X-Y" etc.
         import re
+
         m = re.match(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", geo)
         if m:
             cfg = {"w": int(m.group(1)), "h": int(m.group(2)), "x": int(m.group(3)), "y": int(m.group(4))}
@@ -168,24 +185,6 @@ class VidGadgetApp:
         """종료 시 창 위치 저장 후 닫기"""
         self.save_geometry()
         self.root.destroy()
-
-    def init_prj(self):
-        """프로젝트 초기화 작업"""
-        print("start")
-        test_files = [
-            # r"D:\_Projects\_VidGadget\vidgadget_py\icon\Robot.Dreams.mp4",
-            # r"D:\_Projects\_VidGadget\vidgadget_py\icon\Avatar _5m.mp4",
-            # r"D:\_Projects\_VidGadget\vidgadget_py\icon\달려라 하니.mkv",
-            # r"D:\_Projects\_VidGadget\vidgadget_py\icon\Robot.Dreams_p2.mp4",
-            # r"D:\_Projects\_VidGadget\vidgadget_py\icon\Robot.Dreams_p1.mp4",
-        ]
-        for test_file in test_files:
-            if os.path.isfile(test_file):
-                self.file_listbox.insert(tk.END, test_file)
-
-        if self.file_listbox.size() > 0:
-            self.file_listbox.selection_set(0)
-            self.file_listbox.event_generate("<<ListboxSelect>>")
 
     # ==================== 툴팁 ====================
 
@@ -287,6 +286,7 @@ class VidGadgetApp:
         self.file_listbox = tk.Listbox(inner_frame, height=8, selectmode=tk.SINGLE, exportselection=False)
         self.file_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.file_listbox.bind("<<ListboxSelect>>", self.on_file_select)
+        self.file_listbox.bind("<Double-Button-1>", lambda _: self.show_media_info())
 
         # 리스트 내 드래그로 순서 변경
         self._drag_start_index = None
@@ -322,6 +322,9 @@ class VidGadgetApp:
         btn_clear.pack(side=tk.LEFT, padx=2)
         btn_info = ttk.Button(btn_frame, text="파일 정보", command=self.show_media_info)
         btn_info.pack(side=tk.LEFT, padx=2)
+
+        self.video_info_label = ttk.Label(btn_frame, text="", foreground="gray")
+        self.video_info_label.pack(side=tk.LEFT, padx=(4, 0))
 
         self._create_tooltip(btn_add, "변환할 미디어 파일 추가")
         self._create_tooltip(btn_rm, "선택된 파일 제거")
@@ -815,6 +818,19 @@ class VidGadgetApp:
                 self.audio_stream_listbox.selection_set(0)
             self.audio_stream_count_label.config(text=str(self.media_info.audio_count))
 
+            # 비디오 정보 라벨 업데이트
+            mi = self.media_info
+            parts = []
+            """ if mi.codec_name:
+                parts.append(mi.codec_name)
+            if mi.width and mi.height:
+                parts.append(f"{mi.width}x{mi.height}")
+            if mi.frame_rate:
+                parts.append(f"{mi.frame_rate}fps") """
+            if mi.vfr:
+                parts.append("V")
+            self.video_info_label.config(text=" ".join(parts))
+
             # 구간 끝시간 설정
             duration = self.media_info.duration
             h = duration // 3600
@@ -823,6 +839,8 @@ class VidGadgetApp:
             self.end_hour.set(str(h))
             self.end_min.set(str(m))
             self.end_sec.set(str(s))
+        else:
+            self.video_info_label.config(text="")
 
         self.update_command()
 
@@ -837,8 +855,9 @@ class VidGadgetApp:
         info = MediaInfo.get_info(filename, self.app_path)
 
         if info:
+            print("info", info)
             msg = info.to_string()
-            print(msg)
+            print("msg", msg)
             messagebox.showinfo("미디어 정보", msg)
         else:
             messagebox.showerror("오류", "미디어 정보를 읽을 수 없습니다.")
@@ -980,7 +999,8 @@ class VidGadgetApp:
         # FFmpeg 확인
         if not self.check_ffmpeg():
             messagebox.showerror(
-                "오류", "FFmpeg.exe 파일이 없습니다.\nhttps://ffmpeg.org/download.html 에서 다운로드 하세요."
+                "오류",
+                "FFmpeg.exe 파일이 없습니다.\nhttps://www.gyan.dev/ffmpeg/builds/ 에서 다운로드 하세요.",
             )
             return
 
