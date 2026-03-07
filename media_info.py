@@ -740,13 +740,30 @@ class MediaInfo:
         return info
 
     @staticmethod
+    # VFR - 스터터링(stuttering) 판단
     def _detect_vfr(filename: str) -> bool:
         """첫 30프레임의 packet duration으로 VFR 판단"""
         try:
             result = subprocess.run(
-                ["ffprobe", "-select_streams", "v:0", "-show_entries", "packet=duration_time",
-                 "-read_intervals", "%+#30", "-v", "quiet", "-of", "csv=p=0", filename],
-                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+                [
+                    "ffprobe",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "packet=duration_time",
+                    "-read_intervals",
+                    "%+#30",
+                    "-v",
+                    "quiet",
+                    "-of",
+                    "csv=p=0",
+                    filename,
+                ],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
             )
             durations = {line.strip() for line in result.stdout.strip().split("\n") if line.strip()}
             return len(durations) > 1
