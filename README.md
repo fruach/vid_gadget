@@ -20,6 +20,37 @@ FFmpeg 기반 비디오/오디오 변환 GUI 도구 (Python/Tkinter)
 
 ## 설치
 
+### scoop 로 ffmpeg 설치
+
+- 윈도우 패키지 관리자 scoop 설치
+
+powershell 실행
+```powershell
+Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
+Invoke-RestMethod -Uri 'https://get.scoop.sh' | Invoke-Expression
+```
+
+cmd.exe 에서 한줄 명령:
+```cmd
+powershell -Command "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser; Invoke-RestMethod -Uri 'https://get.scoop.sh' | Invoke-Expression"
+```
+
+- python 설치
+```bash
+scoop install git
+scoop bucket add versions
+scoop install python312
+scoop update python312
+```
+
+- ffmpeg 설치
+```bash
+scoop install ffmpeg
+scoop update ffmpeg
+```
+
+### Python 패키지 설치
+
 ```bash
 pip install -r requirements.txt
 ```
@@ -35,3 +66,4 @@ vidGadget.bat
 2. 코덱, 품질, 해상도 등 옵션 설정
 3. 작업 종류 선택 (변환, 추출, 합치기)
 4. "작업 실행" 클릭
+
