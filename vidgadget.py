@@ -13,7 +13,8 @@ import sys
 import json
 import re
 
-_VERSION_STR = "1.42"
+_VERSION_STR = "1.43"
+_BUILD_DATE_STR = "2026-03-14"
 # 드래그 앤 드롭 지원
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -195,7 +196,7 @@ class VidGadgetApp:
         try:
             with open(self._config_path(), "r") as f:
                 cfg = json.load(f)
-            x, y, w, h = self._clamp_geometry(cfg['x'], cfg['y'], cfg['w'], cfg['h'])
+            x, y, w, h = self._clamp_geometry(cfg["x"], cfg["y"], cfg["w"], cfg["h"])
             self.root.geometry(f"{w}x{h}+{x}+{y}")
         except (FileNotFoundError, KeyError, json.JSONDecodeError):
             pass
@@ -293,7 +294,7 @@ class VidGadgetApp:
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(status_frame, text="?", width=2, command=self.show_about).pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, text="Build Date (2025/05/09)")
+        self.status_label = ttk.Label(status_frame, text="Build Date " + _BUILD_DATE_STR)
         self.status_label.pack(side=tk.LEFT, padx=10)
         link = ttk.Label(status_frame, text=" ", foreground="blue", cursor="hand2")
         link.pack(side=tk.RIGHT)
