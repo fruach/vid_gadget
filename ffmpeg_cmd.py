@@ -37,6 +37,7 @@ PROC_KIND_EXTRACT_AUDIO = 2
 PROC_KIND_CONVERT = 3
 PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
+PROC_KIND_EXTRACT_SUB = 6
 
 # 포맷 상수
 FORMAT_VIDEO = 1
@@ -64,6 +65,10 @@ class FFmpegCommandBuilder:
     def build_command(self, input_file: str, add_pause: bool = False) -> str:
         """FFmpeg 명령어 생성"""
         process_kind = self.settings.get("process_kind", PROC_KIND_CONVERT)
+
+        # 자막 추출
+        if process_kind == PROC_KIND_EXTRACT_SUB:
+            return self._build_extract_sub_command(input_file)
 
         # 합치기 (영상 + 소리)
         if process_kind == PROC_KIND_MERGE_VA:
@@ -106,6 +111,36 @@ class FFmpegCommandBuilder:
         out_file = f"{name}.ts"
 
         return f'ffmpeg -y -i "{input_file}" -c copy -f mpegts "{out_file}"'
+
+    def _build_extract_sub_command(self, input_file: str) -> list:
+        """자막 추출 명령어 (트랙별 개별 명령어 리스트 반환)"""
+        if self.media_info.sub_count == 0:
+            return []
+
+        name, _ = divide_name(input_file)
+        commands = []
+
+        for i in range(self.media_info.sub_count):
+            # 자막 트랙 정보에서 확장자 및 접미사 결정
+            ext = "srt"
+            suffix = ""
+            if i < len(self.media_info.sub_tracks):
+                track = self.media_info.sub_tracks[i]
+                ext = track.extension
+                suffix = track.suffix
+
+            # 트랙별 출력 파일명 (예: movie.ko.srt, movie.en.sdh.srt)
+            if suffix:
+                out_file = f"{name}.{suffix}.{ext}"
+            elif self.media_info.sub_count > 1:
+                out_file = f"{name}.sub{i}.{ext}"
+            else:
+                out_file = f"{name}.{ext}"
+
+            cmd = f'ffmpeg -y -i "{input_file}" -map 0:s:{i} -c:s copy "{out_file}"'
+            commands.append(cmd)
+
+        return commands
 
     def _build_convert_command(self, input_file: str, add_pause: bool = True) -> str:
         """변환 명령어 생성"""

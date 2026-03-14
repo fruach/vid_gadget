@@ -52,6 +52,66 @@ LANG_HINDI = 0x39
 
 
 @dataclass
+class SubInfo:
+    """자막 트랙 정보"""
+
+    codec: str = ""  # subrip, ass, mov_text, dvb_subtitle, hdmv_pgs_subtitle 등
+    lang: int = 0
+    title: str = ""
+    sdh: bool = False
+    forced: bool = False
+
+    @property
+    def extension(self) -> str:
+        """자막 코덱에 맞는 확장자 반환"""
+        ext_map = {
+            "subrip": "srt",
+            "srt": "srt",
+            "ass": "ass",
+            "ssa": "ssa",
+            "mov_text": "srt",
+            "webvtt": "vtt",
+            "hdmv_pgs_subtitle": "sup",
+            "dvd_subtitle": "sup",
+            "dvb_subtitle": "sup",
+        }
+        return ext_map.get(self.codec, "srt")
+
+    @property
+    def lang_name(self) -> str:
+        """언어 이름 반환"""
+        lang_names = {
+            LANG_KOREAN: "KO",
+            LANG_ENGLISH: "EN",
+            LANG_JAPANESE: "JA",
+            LANG_CHINESE: "ZH",
+            LANG_SPANISH: "ES",
+            LANG_FRENCH: "FR",
+            LANG_ITALIAN: "IT",
+            LANG_GERMAN: "DE",
+        }
+        return lang_names.get(self.lang, "")
+
+    @property
+    def suffix(self) -> str:
+        """파일명에 붙일 자막 정보 접미사 (예: .ko.sdh, .en.forced)"""
+        parts = []
+        if self.lang_name:
+            parts.append(self.lang_name.lower())
+        if self.sdh:
+            parts.append("sdh")
+        if self.forced:
+            parts.append("forced")
+        if self.title and not self.sdh and not self.forced:
+            t = self.title.strip()
+            t_upper = t.upper()
+            # title에 lang/SDH/forced 외 유용한 정보가 있으면 추가
+            if "SDH" not in t_upper and "FORCED" not in t_upper and t_upper not in ("", self.lang_name):
+                parts.append(t)
+        return ".".join(parts)
+
+
+@dataclass
 class AudioInfo:
     """오디오 트랙 정보"""
 
@@ -118,6 +178,7 @@ class MEDIA_INFO:
     audio_count: int = 0
 
     # 자막 정보
+    sub_tracks: List[SubInfo] = field(default_factory=list)
     sub_count: int = 0
 
     def clear(self):
@@ -136,6 +197,7 @@ class MEDIA_INFO:
         self.depth = 0
         self.audio_tracks = []
         self.audio_count = 0
+        self.sub_tracks = []
         self.sub_count = 0
 
     @property
@@ -299,9 +361,39 @@ class MediaInfo:
                     MediaInfo._parse_audio(info.audio_tracks[audio_idx], name, value, value_upper)
 
             # 자막 섹션
-            elif current_section == MediaInfo.SEC_SUB:
-                if name.upper() == "ID":
+            elif current_section >= MediaInfo.SEC_SUB:
+                name_upper = name.upper()
+                if name_upper == "ID":
+                    info.sub_tracks.append(SubInfo())
                     info.sub_count += 1
+                elif info.sub_tracks:
+                    if name_upper == "FORMAT":
+                        fmt = value_upper
+                        if "SRT" in fmt or "UTF-8" in fmt:
+                            info.sub_tracks[-1].codec = "subrip"
+                        elif "ASS" in fmt:
+                            info.sub_tracks[-1].codec = "ass"
+                        elif "SSA" in fmt:
+                            info.sub_tracks[-1].codec = "ssa"
+                        elif "PGS" in fmt:
+                            info.sub_tracks[-1].codec = "hdmv_pgs_subtitle"
+                        elif "VOBSUB" in fmt:
+                            info.sub_tracks[-1].codec = "dvd_subtitle"
+                    elif name_upper == "LANGUAGE":
+                        if "KOREAN" in value_upper:
+                            info.sub_tracks[-1].lang = LANG_KOREAN
+                        elif "ENGLISH" in value_upper:
+                            info.sub_tracks[-1].lang = LANG_ENGLISH
+                        elif "JAPANES" in value_upper:
+                            info.sub_tracks[-1].lang = LANG_JAPANESE
+                        elif "CHINESE" in value_upper:
+                            info.sub_tracks[-1].lang = LANG_CHINESE
+                    elif name_upper == "TITLE":
+                        info.sub_tracks[-1].title = value
+                        if "SDH" in value_upper:
+                            info.sub_tracks[-1].sdh = True
+                        if "FORCED" in value_upper:
+                            info.sub_tracks[-1].forced = True
 
         # 오디오 비트레이트 추정
         for audio in info.audio_tracks:
@@ -585,6 +677,25 @@ class MediaInfo:
                     info.audio_count += 1
 
                 elif track.track_type == "Text":
+                    sub = SubInfo()
+                    sub.codec = (track.format or "").lower()
+                    lang = (track.language or "").upper()
+                    if "KO" in lang or "KOREAN" in lang:
+                        sub.lang = LANG_KOREAN
+                    elif "EN" in lang or "ENGLISH" in lang:
+                        sub.lang = LANG_ENGLISH
+                    elif "JA" in lang or "JAPANES" in lang:
+                        sub.lang = LANG_JAPANESE
+                    elif "ZH" in lang or "CHINESE" in lang:
+                        sub.lang = LANG_CHINESE
+                    sub.title = getattr(track, "title", "") or ""
+                    if sub.title:
+                        title_upper = sub.title.upper()
+                        if "SDH" in title_upper:
+                            sub.sdh = True
+                        if "FORCED" in title_upper:
+                            sub.forced = True
+                    info.sub_tracks.append(sub)
                     info.sub_count += 1
 
             return info
@@ -732,6 +843,25 @@ class MediaInfo:
                 info.audio_count += 1
 
             elif codec_type == "subtitle":
+                sub = SubInfo()
+                sub.codec = codec_name
+                lang = (stream.get("tags", {}).get("language") or "").lower()
+                for key, val in lang_map.items():
+                    if key in lang:
+                        sub.lang = val
+                        break
+                sub.title = stream.get("tags", {}).get("title", "")
+                disposition = stream.get("disposition", {})
+                sub.sdh = bool(disposition.get("hearing_impaired", 0))
+                sub.forced = bool(disposition.get("forced", 0))
+                # title에 SDH/forced 힌트가 있으면 플래그 설정
+                if sub.title:
+                    title_upper = sub.title.upper()
+                    if "SDH" in title_upper:
+                        sub.sdh = True
+                    if "FORCED" in title_upper:
+                        sub.forced = True
+                info.sub_tracks.append(sub)
                 info.sub_count += 1
 
         # VFR 판단: 첫 30프레임의 duration 비교

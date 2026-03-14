@@ -34,6 +34,7 @@ PROC_KIND_EXTRACT_AUDIO = 2
 PROC_KIND_CONVERT = 3
 PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
+PROC_KIND_EXTRACT_SUB = 6
 
 # 코덱 상수
 CODEC_UNKNOWN = 0
@@ -179,24 +180,36 @@ class VidGadgetApp:
     def _config_path(self):
         return os.path.join(self.app_path, "vidgadget_config.json")
 
+    def _clamp_geometry(self, x, y, w, h):
+        """창 위치/크기를 화면 범위 이내로 보정"""
+        scr_w = self.root.winfo_screenwidth()
+        scr_h = self.root.winfo_screenheight()
+        w = max(400, min(w, scr_w))
+        h = max(300, min(h, scr_h))
+        x = max(0, min(x, scr_w - w))
+        y = max(0, min(y, scr_h - h))
+        return x, y, w, h
+
     def load_geometry(self):
         """저장된 창 위치/크기 복원"""
         try:
             with open(self._config_path(), "r") as f:
                 cfg = json.load(f)
-            self.root.geometry(f"{cfg['w']}x{cfg['h']}+{cfg['x']}+{cfg['y']}")
+            x, y, w, h = self._clamp_geometry(cfg['x'], cfg['y'], cfg['w'], cfg['h'])
+            self.root.geometry(f"{w}x{h}+{x}+{y}")
         except (FileNotFoundError, KeyError, json.JSONDecodeError):
             pass
 
     def save_geometry(self):
         """현재 창 위치/크기 저장"""
         geo = self.root.geometry()  # "WxH+X+Y"
-        # parse "WxH+X+Y" or "WxH-X-Y" etc.
         import re
 
         m = re.match(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", geo)
         if m:
-            cfg = {"w": int(m.group(1)), "h": int(m.group(2)), "x": int(m.group(3)), "y": int(m.group(4))}
+            w, h, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            x, y, w, h = self._clamp_geometry(x, y, w, h)
+            cfg = {"w": w, "h": h, "x": x, "y": y}
             with open(self._config_path(), "w") as f:
                 json.dump(cfg, f)
 
@@ -668,6 +681,14 @@ class VidGadgetApp:
             command=self.on_process_change,
         )
         rb_ea.pack(anchor=tk.W)
+        rb_es = ttk.Radiobutton(
+            frame,
+            text="자막 추출",
+            variable=self.process_kind_var,
+            value=PROC_KIND_EXTRACT_SUB,
+            command=self.on_process_change,
+        )
+        rb_es.pack(anchor=tk.W)
         rb_m = ttk.Radiobutton(
             frame,
             text="합치기(동영상+동영상..)",
@@ -695,6 +716,7 @@ class VidGadgetApp:
 
         self._create_tooltip(rb_ev, "비디오 스트림만 추출 (오디오 제외)")
         self._create_tooltip(rb_ea, "오디오 스트림만 추출 (비디오 제외)")
+        self._create_tooltip(rb_es, "자막 스트림 추출 (SRT, ASS 등)")
         self._create_tooltip(rb_m, "여러 동영상을 하나로 합치기\nTS 변환 후 concat 방식")
         self._create_tooltip(rb_mva, "별도의 영상 파일과 소리 파일을 합치기")
         self._create_tooltip(rb_c, "코덱/해상도/품질 변환 (기본 모드)")
@@ -1004,10 +1026,12 @@ class VidGadgetApp:
         if self.media_info:
             builder = FFmpegCommandBuilder(settings, self.media_info)
             cmd = builder.build_command(filename)
-            print(cmd)
 
             self.cmd_text.delete(1.0, tk.END)
-            self.cmd_text.insert(tk.END, cmd)
+            if isinstance(cmd, list):
+                self.cmd_text.insert(tk.END, "\n".join(cmd))
+            else:
+                self.cmd_text.insert(tk.END, cmd)
 
     def start_process(self):
         """작업 시작"""
@@ -1094,8 +1118,22 @@ class VidGadgetApp:
             if process_kind == PROC_KIND_EXTRACT_AUDIO and media_info.audio_count == 0:
                 continue
 
+            # 자막 추출 시 자막 트랙이 없으면 건너뛰기
+            if process_kind == PROC_KIND_EXTRACT_SUB and media_info.sub_count == 0:
+                continue
+
             # 명령어 생성
             builder = FFmpegCommandBuilder(settings, media_info)
+
+            # 자막 추출은 트랙별 개별 명령어
+            if process_kind == PROC_KIND_EXTRACT_SUB:
+                cmds = builder.build_command(filename)
+                for cmd in cmds:
+                    if self.stop_process:
+                        break
+                    self._run_cmd(cmd)
+                continue
+
             # MERGE: 개별 .ts 변환에는 pause 없음 (마지막 concat 명령에서 pause)
             add_pause = False
             if process_kind == PROC_KIND_MERGE:
