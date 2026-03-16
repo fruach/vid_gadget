@@ -1,6 +1,6 @@
 # VidGadget
 
-![VidGadget](vidgadget-200.png)
+<img src="vidGadget-ss.png" width="500">
 
 FFmpeg 기반 비디오/오디오 변환 GUI 도구 (Python/Tkinter)
 
