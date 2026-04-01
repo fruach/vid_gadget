@@ -196,19 +196,26 @@ class VidGadgetApp:
         try:
             with open(self._config_path(), "r") as f:
                 cfg = json.load(f)
-            x, y, w, h = self._clamp_geometry(cfg["x"], cfg["y"], cfg["w"], cfg["h"])
+            x, y, w, h = int(cfg["x"]), int(cfg["y"]), int(cfg["w"]), int(cfg["h"])
+            if w <= 0 or h <= 0:
+                return
+            x, y, w, h = self._clamp_geometry(x, y, w, h)
             self.root.geometry(f"{w}x{h}+{x}+{y}")
-        except (FileNotFoundError, KeyError, json.JSONDecodeError):
+        except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError, ValueError):
             pass
 
     def save_geometry(self):
         """현재 창 위치/크기 저장"""
+        if self.root.state() == "iconic":
+            return
         geo = self.root.geometry()  # "WxH+X+Y"
         import re
 
         m = re.match(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", geo)
         if m:
             w, h, x, y = int(m.group(1)), int(m.group(2)), int(m.group(3)), int(m.group(4))
+            if w <= 0 or h <= 0:
+                return
             x, y, w, h = self._clamp_geometry(x, y, w, h)
             cfg = {"w": w, "h": h, "x": x, "y": y}
             with open(self._config_path(), "w") as f:

@@ -18,15 +18,41 @@ FFmpeg 기반 비디오/오디오 변환 GUI 도구 (Python/Tkinter)
 
 - Python 3.8+
 - FFmpeg (PATH에 등록 또는 같은 폴더에 위치)
-- MediaInfo (선택사항)
+
 
 ## 설치
 
-### scoop 로 ffmpeg 설치
+### Python 다운로드 및 설치
 
-- 윈도우 패키지 관리자 scoop 설치
+공식 사이트에서 다운로드:
+- https://www.python.org/downloads/
+- 설치 시 **"Add Python to PATH"** 체크 필수
 
-powershell 실행
+설치 확인:
+```bash
+python --version
+```
+
+### FFmpeg 다운로드 및 설치
+
+공식 사이트에서 다운로드:
+- https://ffmpeg.org/download.html
+- Windows 빌드: https://www.gyan.dev/ffmpeg/builds/ 에서 `ffmpeg-release-essentials.zip` 다운로드
+
+설치 방법:
+1. 압축 해제 후 `bin` 폴더 안의 `ffmpeg.exe`를 vidGadget 폴더에 복사하거나
+2. `bin` 폴더 경로를 시스템 환경변수 PATH에 추가
+
+설치 확인:
+```bash
+ffmpeg -version
+```
+
+### scoop을 이용한 설치 (대안)
+
+윈도우 패키지 관리자 scoop을 사용하면 Python과 FFmpeg를 간편하게 설치할 수 있습니다.
+
+- scoop 설치 (powershell 실행)
 ```powershell
 Set-ExecutionPolicy RemoteSigned -Scope CurrentUser
 Invoke-RestMethod -Uri 'https://get.scoop.sh' | Invoke-Expression
@@ -37,18 +63,16 @@ cmd.exe 에서 한줄 명령:
 powershell -Command "Set-ExecutionPolicy RemoteSigned -Scope CurrentUser; Invoke-RestMethod -Uri 'https://get.scoop.sh' | Invoke-Expression"
 ```
 
-- python 설치
+- Python 설치
 ```bash
 scoop install git
 scoop bucket add versions
 scoop install python312
-scoop update python312
 ```
 
-- ffmpeg 설치
+- FFmpeg 설치
 ```bash
 scoop install ffmpeg
-scoop update ffmpeg
 ```
 
 ### Python 패키지 설치
