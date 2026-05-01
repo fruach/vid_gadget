@@ -113,6 +113,10 @@ class VidGadgetApp:
         self.selected_video_index = -1
         self.media_info = None
         self.stop_process = False
+        self.process_thread = None
+        self.current_process = None
+        self.process_lock = threading.Lock()
+        self.process_button_state_token = 0
         self.app_path = os.path.dirname(os.path.abspath(__file__))
 
         # UI 변수들
@@ -729,7 +733,9 @@ class VidGadgetApp:
         self._create_tooltip(rb_mva, "별도의 영상 파일과 소리 파일을 합치기")
         self._create_tooltip(rb_c, "코덱/해상도/품질 변환 (기본 모드)")
 
-        ttk.Button(frame, text="작업 실행", command=self.start_process).pack(pady=(8, 0), fill=tk.X)
+        self.process_button = tk.Button(frame, text="작업 실행", command=self.on_process_button)
+        self.process_button_default_fg = self.process_button.cget("fg")
+        self.process_button.pack(pady=(8, 0), fill=tk.X)
 
     def setup_command_display(self, parent):
         """명령어 표시 영역 — C++ FFmpeg 명령행 에디트 대응"""
@@ -1041,6 +1047,13 @@ class VidGadgetApp:
             else:
                 self.cmd_text.insert(tk.END, cmd)
 
+    def on_process_button(self):
+        """작업 실행/중지 버튼 이벤트"""
+        if self.process_thread and self.process_thread.is_alive():
+            self.stop_current_process()
+        else:
+            self.start_process()
+
     def start_process(self):
         """작업 시작"""
         if self.file_listbox.size() == 0:
@@ -1057,8 +1070,38 @@ class VidGadgetApp:
 
         # 쓰레드로 실행
         self.stop_process = False
-        thread = threading.Thread(target=self.do_process)
-        thread.start()
+        self._set_process_button("작업 중지", "red")
+        self.process_thread = threading.Thread(target=self.do_process, daemon=True)
+        self.process_thread.start()
+
+    def stop_current_process(self):
+        """현재 진행 중인 작업 강제 중지"""
+        self.stop_process = True
+        self.status_label.config(text="중지 중...")
+
+        with self.process_lock:
+            process = self.current_process
+
+        if process and process.poll() is None:
+            process.kill()
+
+    def _finish_process(self, status_text: str):
+        """작업 종료 후 UI 상태 복원"""
+        self._set_process_button("작업 실행", self.process_button_default_fg)
+        self.status_label.config(text=status_text)
+
+    def _set_process_button(self, text: str, fg: str):
+        """작업 버튼 텍스트 변경 후 일정시간 동안 클릭 방지"""
+        disable_tile = 1500
+        self.process_button_state_token += 1
+        token = self.process_button_state_token
+        self.process_button.config(text=text, fg=fg, state=tk.DISABLED)
+        self.root.after(disable_tile, lambda: self._enable_process_button(token))
+
+    def _enable_process_button(self, token: int):
+        """가장 최근 버튼 상태 변경에 대해서만 버튼 활성화"""
+        if token == self.process_button_state_token:
+            self.process_button.config(state=tk.NORMAL)
 
     def check_ffmpeg(self) -> bool:
         """FFmpeg 존재 여부 확인"""
@@ -1084,87 +1127,106 @@ class VidGadgetApp:
         try:
             print(f"Running command: {cmd}")
             if create_new_console:
-                subprocess.Popen(f"cmd /c {cmd}", creationflags=subprocess.CREATE_NEW_CONSOLE)
+                process = subprocess.Popen(f"cmd /c {cmd}", creationflags=subprocess.CREATE_NEW_CONSOLE)
             else:
                 # cmd.exe를 거치면 한글 등 유니코드 인코딩이 깨지므로 직접 실행
-                subprocess.run(cmd)
+                process = subprocess.Popen(cmd)
+
+            with self.process_lock:
+                self.current_process = process
+
+            process.wait()
+
+            with self.process_lock:
+                if self.current_process == process:
+                    self.current_process = None
 
             print(f"-------------------------------------\n명령 종료:\n {cmd}")
 
         except Exception as e:
             print(f"Error: {e}")
+            with self.process_lock:
+                self.current_process = None
 
     def do_process(self):
         """실제 처리 작업"""
-        settings = self.get_settings()
-        files = settings["files"]
-        process_kind = settings["process_kind"]
+        status_text = "완료"
 
-        # 합치기 (영상 + 소리) - 단일 명령으로 처리
-        if process_kind == PROC_KIND_MERGE_VA:
-            media_info = MediaInfo.get_info(files[0], self.app_path) if files else None
-            if media_info:
-                builder = FFmpegCommandBuilder(settings, media_info)
-                cmd = builder.build_command(files[0])
-                self._run_cmd(cmd)
-            self.root.after(0, lambda: self.status_label.config(text="완료"))
-            return
+        try:
+            settings = self.get_settings()
+            files = settings["files"]
+            process_kind = settings["process_kind"]
 
-        for i, filename in enumerate(files):
-            if self.stop_process:
-                break
-
-            # 상태 업데이트
-            self.root.after(0, lambda f=filename: self.status_label.config(text=f"처리 중: {f}"))
-
-            # 미디어 정보
-            media_info = MediaInfo.get_info(filename, self.app_path)
-            if not media_info:
-                continue
-
-            # 오디오 추출 시 오디오 트랙이 없으면 건너뛰기
-            if process_kind == PROC_KIND_EXTRACT_AUDIO and media_info.audio_count == 0:
-                continue
-
-            # 자막 추출 시 자막 트랙이 없으면 건너뛰기
-            if process_kind == PROC_KIND_EXTRACT_SUB and media_info.sub_count == 0:
-                continue
-
-            # 명령어 생성
-            builder = FFmpegCommandBuilder(settings, media_info)
-
-            # 자막 추출은 트랙별 개별 명령어
-            if process_kind == PROC_KIND_EXTRACT_SUB:
-                cmds = builder.build_command(filename)
-                for cmd in cmds:
-                    if self.stop_process:
-                        break
+            # 합치기 (영상 + 소리) - 단일 명령으로 처리
+            if process_kind == PROC_KIND_MERGE_VA:
+                media_info = MediaInfo.get_info(files[0], self.app_path) if files else None
+                if media_info:
+                    builder = FFmpegCommandBuilder(settings, media_info)
+                    cmd = builder.build_command(files[0])
                     self._run_cmd(cmd)
-                continue
+                return
 
-            # MERGE: 개별 .ts 변환에는 pause 없음 (마지막 concat 명령에서 pause)
-            add_pause = False
-            if process_kind == PROC_KIND_MERGE:
+            for i, filename in enumerate(files):
+                if self.stop_process:
+                    break
+
+                # 상태 업데이트
+                self.root.after(0, lambda f=filename: self.status_label.config(text=f"처리 중: {f}"))
+
+                # 미디어 정보
+                media_info = MediaInfo.get_info(filename, self.app_path)
+                if not media_info:
+                    continue
+
+                # 오디오 추출 시 오디오 트랙이 없으면 건너뛰기
+                if process_kind == PROC_KIND_EXTRACT_AUDIO and media_info.audio_count == 0:
+                    continue
+
+                # 자막 추출 시 자막 트랙이 없으면 건너뛰기
+                if process_kind == PROC_KIND_EXTRACT_SUB and media_info.sub_count == 0:
+                    continue
+
+                # 명령어 생성
+                builder = FFmpegCommandBuilder(settings, media_info)
+
+                # 자막 추출은 트랙별 개별 명령어
+                if process_kind == PROC_KIND_EXTRACT_SUB:
+                    cmds = builder.build_command(filename)
+                    for cmd in cmds:
+                        if self.stop_process:
+                            break
+                        self._run_cmd(cmd)
+                    continue
+
+                # MERGE: 개별 .ts 변환에는 pause 없음 (마지막 concat 명령에서 pause)
                 add_pause = False
-            else:
-                # add_pause = i == len(files) - 1
-                pass
+                if process_kind == PROC_KIND_MERGE:
+                    add_pause = False
+                else:
+                    # add_pause = i == len(files) - 1
+                    pass
 
-            cmd = builder.build_command(filename, add_pause)
+                cmd = builder.build_command(filename, add_pause)
 
-            # 실행
-            self._run_cmd(cmd)
-
-        # 합치기 (동영상+동영상) - .ts 변환 후 최종 합치기
-        if process_kind == PROC_KIND_MERGE and len(files) >= 2:
-            name, ext = divide_name(files[0])
-            output_file = f"{name}_ALL.{ext}"
-            cmd = FFmpegCommandBuilder.build_merge_all_command(files, output_file)
-
-            if cmd:
+                # 실행
                 self._run_cmd(cmd)
 
-        self.root.after(0, lambda: self.status_label.config(text="완료"))
+            # 합치기 (동영상+동영상) - .ts 변환 후 최종 합치기
+            if not self.stop_process and process_kind == PROC_KIND_MERGE and len(files) >= 2:
+                name, ext = divide_name(files[0])
+                output_file = f"{name}_ALL.{ext}"
+                cmd = FFmpegCommandBuilder.build_merge_all_command(files, output_file)
+
+                if cmd:
+                    self._run_cmd(cmd)
+
+        except Exception as e:
+            status_text = "오류"
+            print(f"Error: {e}")
+        finally:
+            if self.stop_process:
+                status_text = "중지됨"
+            self.root.after(0, lambda text=status_text: self._finish_process(text))
 
 
 def main():
