@@ -156,10 +156,10 @@ class FFmpegCommandBuilder:
         # 각 부분 생성
         video_codec_input = self._get_video_codec_input()
         video_cmd = self._get_video_command(process_kind)
-        audio_cmd = self._get_audio_command(process_kind)
+        audio_cmd = self._get_audio_command(process_kind, output_file)
         range_cmd = self._get_range_command()
         cfr_cmd = self._get_cfr_command()
-        sub_cmd = self._get_subtitle_command(input_file, process_kind)
+        sub_cmd = self._get_subtitle_command(input_file, process_kind, output_file)
 
         # 복사 모드일 때 video_codec_input 초기화 (C++ CmdGet: sVideoCodecInput = "")
         video_copy = self.settings.get("video_copy", False)
@@ -330,7 +330,7 @@ class FFmpegCommandBuilder:
 
         return f'-vf "{scaler}={target_w}:{target_h}"'
 
-    def _get_audio_command(self, process_kind: int) -> str:
+    def _get_audio_command(self, process_kind: int, output_file: Optional[str] = None) -> str:
         """오디오 명령어 생성 (C++ CmdGet 오디오 섹션 대응)"""
         if self.media_info.audio_count == 0:
             return ""
@@ -347,6 +347,7 @@ class FFmpegCommandBuilder:
         audio_sample_check = self.settings.get("audio_sample_check", False)
         ch2 = self.settings.get("ch2", False)
         cbr = self.settings.get("cbr", False)
+        output_ext = divide_name(output_file)[1].lower() if output_file else ""
 
         # 복사 모드
         if audio_copy or self._range_copy or process_kind == PROC_KIND_EXTRACT_AUDIO:
@@ -356,6 +357,9 @@ class FFmpegCommandBuilder:
             if process_kind == PROC_KIND_EXTRACT_AUDIO and audio_sel:
                 track = audio_sel[0]
                 return f"-map 0:a:{track} -c:a copy"
+
+            if output_ext == "mp4" and not self._can_copy_all_audio_to_mp4():
+                return "-map 0:a -c:a aac -q:a 1"
             return "-map 0:a -c:a copy"
 
         # 오디오 코덱 결정
@@ -404,6 +408,8 @@ class FFmpegCommandBuilder:
             should_encode = (
                 (track_bitrate // n_channel > 80) or audio_force_encode or self.format_dest == FORMAT_AUDIO
             )
+            if output_ext == "mp4" and not self._can_copy_audio_track_to_mp4(i):
+                should_encode = True
 
             if should_encode:
                 track_quality = self._get_audio_quality_for_track(output_codec, audio_sample, cbr)
@@ -437,6 +443,21 @@ class FFmpegCommandBuilder:
             return f"-map 0:a -c:a {audio_codec} {track_quality}"
 
         return " ".join(audio_parts)
+
+    def _can_copy_all_audio_to_mp4(self) -> bool:
+        """MP4로 그대로 복사 가능한 오디오 트랙인지 확인"""
+        return all(self._can_copy_audio_track_to_mp4(i) for i in range(self.media_info.audio_count))
+
+    def _can_copy_audio_track_to_mp4(self, track_index: int) -> bool:
+        """MP4 컨테이너에 안전하게 복사 가능한 오디오 코덱인지 확인"""
+        if track_index >= len(self.media_info.audio_tracks):
+            return False
+
+        return self.media_info.audio_tracks[track_index].codec in {
+            A_CODEC_AAC,
+            A_CODEC_MP3,
+            A_CODEC_AC3,
+        }
 
     def _get_audio_codec(self, output_codec: int) -> str:
         """오디오 코덱 결정"""
@@ -531,13 +552,25 @@ class FFmpegCommandBuilder:
             return "-vsync cfr -fps_mode cfr -af aresample=async=1"
         return ""
 
-    def _get_subtitle_command(self, input_file: str, process_kind: int) -> str:
+    def _get_subtitle_command(
+        self, input_file: str, process_kind: int, output_file: Optional[str] = None
+    ) -> str:
         """자막 명령어"""
         name, ext = divide_name(input_file)
         ext = ext.lower()
+        output_ext = divide_name(output_file)[1].lower() if output_file else ext
 
         if ext == "mkv" and process_kind == PROC_KIND_CONVERT:
             if self.media_info.sub_count >= 1:
+                if output_ext == "mp4":
+                    sub_maps = []
+                    text_codecs = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt"}
+                    for i, track in enumerate(self.media_info.sub_tracks):
+                        if track.codec in text_codecs:
+                            sub_maps.append(f"-map 0:s:{i}")
+                    if sub_maps:
+                        return f"{' '.join(sub_maps)} -c:s mov_text"
+                    return ""
                 return "-map 0:s -c:s copy"
         return ""
 

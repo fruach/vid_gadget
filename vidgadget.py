@@ -308,7 +308,7 @@ class VidGadgetApp:
 
     def show_about(self):
         """About 대화상자"""
-        messagebox.showinfo(f"About VidGadget", "VidGadget v{_VERSION_STR} Python")
+        messagebox.showinfo("About VidGadget", f"VidGadget v{_VERSION_STR} Python")
 
     def setup_file_list(self, parent):
         """파일 리스트 UI 구성"""
