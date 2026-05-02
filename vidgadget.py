@@ -1156,6 +1156,7 @@ class VidGadgetApp:
             settings = self.get_settings()
             files = settings["files"]
             process_kind = settings["process_kind"]
+            total_files = len(files)
 
             # 합치기 (영상 + 소리) - 단일 명령으로 처리
             if process_kind == PROC_KIND_MERGE_VA:
@@ -1171,7 +1172,12 @@ class VidGadgetApp:
                     break
 
                 # 상태 업데이트
-                self.root.after(0, lambda f=filename: self.status_label.config(text=f"처리 중: {f}"))
+                self.root.after(
+                    0,
+                    lambda f=filename, current=i + 1, total=total_files: self.status_label.config(
+                        text=f"처리 중 ({current}/{total}): {f}"
+                    ),
+                )
 
                 # 미디어 정보
                 media_info = MediaInfo.get_info(filename, self.app_path)
