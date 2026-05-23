@@ -38,6 +38,7 @@ PROC_KIND_CONVERT = 3
 PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
 PROC_KIND_EXTRACT_SUB = 6
+PROC_KIND_DELETE_TAGS = 7
 
 # 포맷 상수
 FORMAT_VIDEO = 1
@@ -69,6 +70,10 @@ class FFmpegCommandBuilder:
         # 자막 추출
         if process_kind == PROC_KIND_EXTRACT_SUB:
             return self._build_extract_sub_command(input_file)
+
+        # 태그 삭제
+        if process_kind == PROC_KIND_DELETE_TAGS:
+            return self._build_delete_tags_command(input_file, add_pause)
 
         # 합치기 (영상 + 소리)
         if process_kind == PROC_KIND_MERGE_VA:
@@ -141,6 +146,19 @@ class FFmpegCommandBuilder:
             commands.append(cmd)
 
         return commands
+
+    def _build_delete_tags_command(self, input_file: str, add_pause: bool = False) -> str:
+        """오디오 파일 태그 삭제 명령어"""
+        output_codec = self.settings.get("output_codec", CODEC_265)
+        output_file = get_output_filename(input_file, output_codec, self.settings, self.media_info)
+
+        cmd = (
+            f'ffmpeg -y -i "{input_file}" -map 0:a -c:a copy '
+            f'-map_metadata -1 -map_metadata:s:a -1 -map_chapters -1 -bitexact "{output_file}"'
+        )
+        if add_pause:
+            cmd += " & pause"
+        return cmd
 
     def _build_convert_command(self, input_file: str, add_pause: bool = True) -> str:
         """변환 명령어 생성"""

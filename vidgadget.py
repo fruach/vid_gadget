@@ -27,7 +27,7 @@ except ImportError:
 
 from media_info import MediaInfo, MEDIA_INFO
 from ffmpeg_cmd import FFmpegCommandBuilder
-from utils import is_video_file, is_audio_file, get_extension, get_output_filename, divide_name
+from utils import is_video_file, is_audio_file, is_tag_delete_audio_file, get_extension, get_output_filename, divide_name
 
 # 프로세스 종류 상수
 PROC_KIND_EXTRACT_VIDEO = 1
@@ -36,6 +36,7 @@ PROC_KIND_CONVERT = 3
 PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
 PROC_KIND_EXTRACT_SUB = 6
+PROC_KIND_DELETE_TAGS = 7
 
 # 코덱 상수
 CODEC_UNKNOWN = 0
@@ -677,6 +678,14 @@ class VidGadgetApp:
         frame.pack(fill=tk.X, pady=2)
 
         # 라디오 버튼들 세로 배치 (C++ 원본과 동일)
+        rb_dt = ttk.Radiobutton(
+            frame,
+            text="태그 삭제",
+            variable=self.process_kind_var,
+            value=PROC_KIND_DELETE_TAGS,
+            command=self.on_process_change,
+        )
+        rb_dt.pack(anchor=tk.W)
         rb_ev = ttk.Radiobutton(
             frame,
             text="영상 추출",
@@ -726,6 +735,7 @@ class VidGadgetApp:
         )
         rb_c.pack(anchor=tk.W)
 
+        self._create_tooltip(rb_dt, "오디오 파일의 메타데이터, 가사, 챕터, 커버 이미지 제거")
         self._create_tooltip(rb_ev, "비디오 스트림만 추출 (오디오 제외)")
         self._create_tooltip(rb_ea, "오디오 스트림만 추출 (비디오 제외)")
         self._create_tooltip(rb_es, "자막 스트림 추출 (SRT, ASS 등)")
@@ -1034,6 +1044,11 @@ class VidGadgetApp:
         filename = self.file_listbox.get(idx)
         settings = self.get_settings()
 
+        if settings["process_kind"] == PROC_KIND_DELETE_TAGS and not is_tag_delete_audio_file(filename):
+            self.cmd_text.delete(1.0, tk.END)
+            self.cmd_text.insert(tk.END, "echo 태그 삭제는 mp3, flac, wav, opus, aac, ogg 파일만 지원합니다.")
+            return
+
         if not self.media_info:
             self.media_info = MediaInfo.get_info(filename, self.app_path)
 
@@ -1184,8 +1199,12 @@ class VidGadgetApp:
                 if not media_info:
                     continue
 
+                # 태그 삭제는 지정된 음악 파일만 처리
+                if process_kind == PROC_KIND_DELETE_TAGS and not is_tag_delete_audio_file(filename):
+                    continue
+
                 # 오디오 추출 시 오디오 트랙이 없으면 건너뛰기
-                if process_kind == PROC_KIND_EXTRACT_AUDIO and media_info.audio_count == 0:
+                if process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS) and media_info.audio_count == 0:
                     continue
 
                 # 자막 추출 시 자막 트랙이 없으면 건너뛰기

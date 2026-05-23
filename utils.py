@@ -42,6 +42,9 @@ AUDIO_EXTENSIONS = {
     ".m4a",
 }
 
+# 태그 삭제 대상 오디오 확장자
+TAG_DELETE_AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".opus", ".aac", ".ogg"}
+
 # 이미지 확장자
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".avif"}
 
@@ -62,6 +65,12 @@ def is_audio_file(filepath: str) -> bool:
     """오디오 파일 여부 확인"""
     ext = get_extension(filepath)
     return ext in AUDIO_EXTENSIONS
+
+
+def is_tag_delete_audio_file(filepath: str) -> bool:
+    """태그 삭제 대상 오디오 파일 여부 확인"""
+    ext = get_extension(filepath)
+    return ext in TAG_DELETE_AUDIO_EXTENSIONS
 
 
 def is_image_file(filepath: str) -> bool:
@@ -107,52 +116,53 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
     # 출력 확장자 결정
     new_ext = ext
 
-    # 포맷 강제 지정
-    if settings.get("mp4", False):
-        new_ext = "mp4"
-    elif settings.get("mkv", False):
-        new_ext = "mkv"
-
-    # 코덱별 확장자
-    codec_extensions = {
-        CODEC_AV1: "mp4",
-        CODEC_AVIF: "avif",
-        CODEC_GIF: "gif",
-        CODEC_WEBP: "webp",
-        CODEC_WAV: "wav",
-        CODEC_FLAC: "flac",
-        CODEC_MP3: "mp3",
-        CODEC_OGG: "ogg",
-        CODEC_OPUS: "opus",
-        CODEC_AAC: "aac",
-    }
-
-    if output_codec in codec_extensions:
-        new_ext = codec_extensions[output_codec]
-    elif output_codec in [CODEC_264, CODEC_265]:
-        # 비디오 코덱인데 비디오 확장자가 아닌 경우
-        if new_ext not in ["mp4", "mkv"]:
+    if process_kind != 7:  # PROC_KIND_DELETE_TAGS
+        # 포맷 강제 지정
+        if settings.get("mp4", False):
             new_ext = "mp4"
+        elif settings.get("mkv", False):
+            new_ext = "mkv"
 
-    # 오디오 추출인 경우: 오디오 스트림의 코덱에 맞는 확장자 사용
-    if process_kind == 2 and media_info is not None:  # PROC_KIND_EXTRACT_AUDIO
-        audio_codec_ext = {
-            51: "mp3",   # A_CODEC_MP3
-            52: "aac",   # A_CODEC_AAC
-            53: "ogg",   # A_CODEC_OGG
-            54: "dts",   # A_CODEC_DTS
-            55: "wav",   # A_CODEC_WAV
-            56: "ac3",   # A_CODEC_AC3
-            57: "opus",  # A_CODEC_OPUS
-            58: "flac",  # A_CODEC_FLAC
-            59: "mka",   # A_CODEC_MKA
+        # 코덱별 확장자
+        codec_extensions = {
+            CODEC_AV1: "mp4",
+            CODEC_AVIF: "avif",
+            CODEC_GIF: "gif",
+            CODEC_WEBP: "webp",
+            CODEC_WAV: "wav",
+            CODEC_FLAC: "flac",
+            CODEC_MP3: "mp3",
+            CODEC_OGG: "ogg",
+            CODEC_OPUS: "opus",
+            CODEC_AAC: "aac",
         }
-        audio_sel = settings.get("audio_sel", []) if settings else []
-        track_idx = audio_sel[0] if audio_sel else 0
-        if hasattr(media_info, 'audio_tracks') and track_idx < len(media_info.audio_tracks):
-            a_codec = media_info.audio_tracks[track_idx].codec
-            if a_codec in audio_codec_ext:
-                new_ext = audio_codec_ext[a_codec]
+
+        if output_codec in codec_extensions:
+            new_ext = codec_extensions[output_codec]
+        elif output_codec in [CODEC_264, CODEC_265]:
+            # 비디오 코덱인데 비디오 확장자가 아닌 경우
+            if new_ext not in ["mp4", "mkv"]:
+                new_ext = "mp4"
+
+        # 오디오 추출인 경우: 오디오 스트림의 코덱에 맞는 확장자 사용
+        if process_kind == 2 and media_info is not None:  # PROC_KIND_EXTRACT_AUDIO
+            audio_codec_ext = {
+                51: "mp3",   # A_CODEC_MP3
+                52: "aac",   # A_CODEC_AAC
+                53: "ogg",   # A_CODEC_OGG
+                54: "dts",   # A_CODEC_DTS
+                55: "wav",   # A_CODEC_WAV
+                56: "ac3",   # A_CODEC_AC3
+                57: "opus",  # A_CODEC_OPUS
+                58: "flac",  # A_CODEC_FLAC
+                59: "mka",   # A_CODEC_MKA
+            }
+            audio_sel = settings.get("audio_sel", []) if settings else []
+            track_idx = audio_sel[0] if audio_sel else 0
+            if hasattr(media_info, 'audio_tracks') and track_idx < len(media_info.audio_tracks):
+                a_codec = media_info.audio_tracks[track_idx].codec
+                if a_codec in audio_codec_ext:
+                    new_ext = audio_codec_ext[a_codec]
 
     # 이미 생성된 이름인지 확인 (_(02) 형태)
     match = re.search(r"_\((\d+)\)$", name)
