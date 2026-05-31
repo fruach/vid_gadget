@@ -27,7 +27,14 @@ except ImportError:
 
 from media_info import MediaInfo, MEDIA_INFO
 from ffmpeg_cmd import FFmpegCommandBuilder
-from utils import is_video_file, is_audio_file, is_tag_delete_audio_file, get_extension, get_output_filename, divide_name
+from utils import (
+    is_video_file,
+    is_audio_file,
+    is_tag_delete_audio_file,
+    get_extension,
+    get_output_filename,
+    divide_name,
+)
 
 # 프로세스 종류 상수
 PROC_KIND_EXTRACT_VIDEO = 1
@@ -119,6 +126,9 @@ class VidGadgetApp:
         self.process_lock = threading.Lock()
         self.process_button_state_token = 0
         self.app_path = os.path.dirname(os.path.abspath(__file__))
+        self.media_info_window_pos = None
+        self.media_info_window = None
+        self.media_info_text = None
 
         # UI 변수들
         self.gpu_var = tk.BooleanVar(value=True)
@@ -173,7 +183,10 @@ class VidGadgetApp:
         """프로젝트 초기화 작업"""
         print("start")
         test_files = [
-            # r"D:\_Python\app\vidGadget\icon\Robot.Dreams.mp4",  # CFR
+            # r"D:\_Python\app\vidGadget\bak\rain.wav",
+            # r"D:\_Python\app\vidGadget\bak\rain.flac",
+            # r"D:\_Python\app\vidGadget\bak\rain.mp3",
+            # r"D:\_Python\app\vidGadget\bak\Robot.Dreams.mp4",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):
@@ -201,18 +214,29 @@ class VidGadgetApp:
         try:
             with open(self._config_path(), "r") as f:
                 cfg = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError, TypeError):
+            return
+
+        try:
             x, y, w, h = int(cfg["x"]), int(cfg["y"]), int(cfg["w"]), int(cfg["h"])
-            if w <= 0 or h <= 0:
-                return
-            x, y, w, h = self._clamp_geometry(x, y, w, h)
-            self.root.geometry(f"{w}x{h}+{x}+{y}")
-        except (FileNotFoundError, KeyError, json.JSONDecodeError, TypeError, ValueError):
+            if w > 0 and h > 0:
+                x, y, w, h = self._clamp_geometry(x, y, w, h)
+                self.root.geometry(f"{w}x{h}+{x}+{y}")
+        except (KeyError, TypeError, ValueError):
+            pass
+
+        try:
+            x, y = int(cfg["media_info_x"]), int(cfg["media_info_y"])
+            x, y, _, _ = self._clamp_geometry(x, y, 600, 500)
+            self.media_info_window_pos = (x, y)
+        except (KeyError, TypeError, ValueError):
             pass
 
     def save_geometry(self):
         """현재 창 위치/크기 저장"""
         if self.root.state() == "iconic":
             return
+        cfg = {}
         geo = self.root.geometry()  # "WxH+X+Y"
         import re
 
@@ -223,11 +247,28 @@ class VidGadgetApp:
                 return
             x, y, w, h = self._clamp_geometry(x, y, w, h)
             cfg = {"w": w, "h": h, "x": x, "y": y}
-            with open(self._config_path(), "w") as f:
-                json.dump(cfg, f)
+
+        if self.media_info_window_pos:
+            x, y = self.media_info_window_pos
+            x, y, _, _ = self._clamp_geometry(x, y, 600, 500)
+            cfg["media_info_x"] = x
+            cfg["media_info_y"] = y
+
+        with open(self._config_path(), "w") as f:
+            json.dump(cfg, f)
+
+    def remember_media_info_window_pos(self):
+        """미디어 정보 창 위치 저장"""
+        if not self._is_media_info_window_open():
+            return
+        geo = self.media_info_window.geometry()
+        m = re.match(r"\d+x\d+([+-]\d+)([+-]\d+)", geo)
+        if m:
+            self.media_info_window_pos = (int(m.group(1)), int(m.group(2)))
 
     def on_close(self):
         """종료 시 창 위치 저장 후 닫기"""
+        self.remember_media_info_window_pos()
         self.save_geometry()
         self.root.destroy()
 
@@ -907,7 +948,28 @@ class VidGadgetApp:
         else:
             self.video_info_label.config(text="")
 
+        if self._is_media_info_window_open():
+            self.update_media_info_window(filename, self.media_info)
+
         self.update_command()
+
+    def _is_media_info_window_open(self):
+        return self.media_info_window is not None and self.media_info_window.winfo_exists()
+
+    def update_media_info_window(self, filename, info):
+        """열려 있는 미디어 정보 창 내용 갱신"""
+        if not self._is_media_info_window_open() or self.media_info_text is None:
+            return
+
+        if info:
+            msg = info.to_string()
+        else:
+            msg = f"{filename}\n\n미디어 정보를 읽을 수 없습니다."
+
+        self.media_info_text.config(state=tk.NORMAL)
+        self.media_info_text.delete("1.0", tk.END)
+        self.media_info_text.insert(tk.END, msg)
+        self.media_info_text.config(state=tk.DISABLED)
 
     def show_media_info(self):
         """미디어 정보 표시"""
@@ -917,13 +979,46 @@ class VidGadgetApp:
             return
 
         filename = self.file_listbox.get(selection[0])
-        info = MediaInfo.get_info(filename, self.app_path)
+        info = self.media_info
+        if info is None:
+            info = MediaInfo.get_info(filename, self.app_path)
 
         if info:
             print("info", info)
             msg = info.to_string()
             print("msg", msg)
-            messagebox.showinfo("미디어 정보", msg)
+            if self._is_media_info_window_open():
+                self.update_media_info_window(filename, info)
+                self.media_info_window.lift()
+                self.media_info_window.focus_force()
+                return
+
+            info_window = tk.Toplevel(self.root)
+            self.media_info_window = info_window
+            info_window.title("미디어 정보")
+            if self.media_info_window_pos:
+                x, y = self.media_info_window_pos
+                info_window.geometry(f"600x500+{x}+{y}")
+            else:
+                info_window.geometry("600x500")
+            info_window.attributes("-topmost", True)
+
+            def close_info_window():
+                self.remember_media_info_window_pos()
+                self.save_geometry()
+                self.media_info_window = None
+                self.media_info_text = None
+                info_window.destroy()
+
+            text = ScrolledText(info_window, wrap=tk.WORD)
+            self.media_info_text = text
+            text.insert(tk.END, msg)
+            text.config(state=tk.DISABLED)
+            text.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8, 4))
+
+            close_btn = ttk.Button(info_window, text="닫기", command=close_info_window)
+            close_btn.pack(pady=(0, 8))
+            info_window.protocol("WM_DELETE_WINDOW", close_info_window)
         else:
             messagebox.showerror("오류", "미디어 정보를 읽을 수 없습니다.")
 
@@ -1204,7 +1299,10 @@ class VidGadgetApp:
                     continue
 
                 # 오디오 추출 시 오디오 트랙이 없으면 건너뛰기
-                if process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS) and media_info.audio_count == 0:
+                if (
+                    process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS)
+                    and media_info.audio_count == 0
+                ):
                     continue
 
                 # 자막 추출 시 자막 트랙이 없으면 건너뛰기

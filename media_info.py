@@ -119,6 +119,9 @@ class AudioInfo:
     duration: int = 0
     codec: int = 0
     bitrate: int = 0
+    bit_rate_mode: str = ""
+    sampling_rate: int = 0
+    bit_depth: int = 0
     channel: int = 0
     lang: int = 0
 
@@ -248,7 +251,13 @@ class MEDIA_INFO:
             lines.append(f"[오디오 #{i+1}]")
             lines.append(f"  파일 용량 : {audio_size_mb:.3f} MB")
             lines.append(f"  코덱 : {audio.codec_name}")
+            if audio.bit_rate_mode:
+                lines.append(f"  Bit rate mode : {audio.bit_rate_mode}")
             lines.append(f"  채널 : {audio.channel}")
+            if audio.sampling_rate:
+                lines.append(f"  Sampling rate : {audio.sampling_rate} Hz")
+            if audio.bit_depth:
+                lines.append(f"  Bit depth : {audio.bit_depth}bit")
             lines.append(f"  비트레이트 : {audio.bitrate} kbps")
             if audio.lang_name:
                 lines.append(f"  언어 : {audio.lang_name}")
@@ -496,6 +505,8 @@ class MediaInfo:
                 audio.codec = A_CODEC_OGG
             elif "FLAC" in value_upper:
                 audio.codec = A_CODEC_FLAC
+            elif "PCM" in value_upper or "WAVE" in value_upper:
+                audio.codec = A_CODEC_WAV
         elif name_lower == "language":
             if "KOREAN" in value_upper:
                 audio.lang = LANG_KOREAN
@@ -519,8 +530,14 @@ class MediaInfo:
             audio.duration = MediaInfo._parse_duration(value_upper)
         elif name_lower == "channel(s)":
             audio.channel = MediaInfo._parse_number(value)
+        elif name_lower == "sampling rate":
+            audio.sampling_rate = MediaInfo._parse_sampling_rate(value_upper)
+        elif name_lower == "bit depth":
+            audio.bit_depth = MediaInfo._parse_number(value)
         elif name_lower == "bit rate":
             audio.bitrate = MediaInfo._parse_number(value)
+        elif name_lower == "bit rate mode":
+            audio.bit_rate_mode = MediaInfo._parse_bit_rate_mode(value_upper)
 
     @staticmethod
     def _parse_size(value: str) -> int:
@@ -577,6 +594,28 @@ class MediaInfo:
         if match:
             return int(match.group(1))
         return 0
+
+    @staticmethod
+    def _parse_sampling_rate(value_upper: str) -> int:
+        """샘플링 레이트 파싱"""
+        value_clean = value_upper.replace(" ", "")
+        match = re.search(r"([\d.]+)", value_clean)
+        if not match:
+            return 0
+
+        rate = float(match.group(1))
+        if "KHZ" in value_clean:
+            rate *= 1000
+        return int(rate)
+
+    @staticmethod
+    def _parse_bit_rate_mode(value_upper: str) -> str:
+        """비트레이트 모드 파싱"""
+        if "VARIABLE" in value_upper or "VBR" in value_upper:
+            return "Variable"
+        if "CONSTANT" in value_upper or "CBR" in value_upper:
+            return "Constant"
+        return ""
 
     @staticmethod
     def _parse_pymediainfo(filename: str) -> Optional[MEDIA_INFO]:
@@ -642,6 +681,12 @@ class MediaInfo:
                         audio.duration = int(float(track.duration) / 1000)
                     if track.bit_rate:
                         audio.bitrate = int(track.bit_rate) // 1000
+                    if getattr(track, "bit_rate_mode", None):
+                        audio.bit_rate_mode = MediaInfo._parse_bit_rate_mode(str(track.bit_rate_mode).upper())
+                    if getattr(track, "sampling_rate", None):
+                        audio.sampling_rate = int(float(track.sampling_rate))
+                    if getattr(track, "bit_depth", None):
+                        audio.bit_depth = int(track.bit_depth)
                     if track.channel_s:
                         audio.channel = int(track.channel_s)
 
@@ -822,6 +867,12 @@ class MediaInfo:
                     audio.duration = MediaInfo._parse_ffprobe_duration(stream["tags"]["DURATION"])
                 if stream.get("bit_rate"):
                     audio.bitrate = int(stream["bit_rate"]) // 1000
+                if stream.get("sample_rate"):
+                    audio.sampling_rate = int(stream["sample_rate"])
+                if stream.get("bits_per_sample"):
+                    audio.bit_depth = int(stream["bits_per_sample"])
+                elif stream.get("bits_per_raw_sample"):
+                    audio.bit_depth = int(stream["bits_per_raw_sample"])
                 audio.channel = int(stream.get("channels", 0))
 
                 for key, val in audio_codec_map.items():
@@ -915,16 +966,16 @@ class MediaInfo:
             print(f"{filename} 가 없습니다.")
             return None
 
-        """ try:
-            from pymediainfo import MediaInfo as PyMediaInfo
+        info = MediaInfo._parse_mediainfo_exe(filename, app_path)
+        if info:
+            return info
 
-            ret = MediaInfo._parse_pymediainfo(filename)
-            print("pymediainfo result:", ret)
-            return ret
-        except ImportError:
-            pass
+        try:
+            info = MediaInfo._parse_pymediainfo(filename)
+            if info:
+                return info
         except Exception as e:
-            print(f"pymediainfo 파싱 오류: {e}") """
+            print(f"pymediainfo 파싱 오류: {e}")
 
         #  ffprobe 시도 (FFmpeg 필수 의존성)
         return MediaInfo._parse_ffprobe(filename)
