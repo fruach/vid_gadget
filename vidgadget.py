@@ -12,6 +12,7 @@ import os
 import sys
 import json
 import re
+import importlib.util
 
 _VERSION_STR = "1.43"
 _BUILD_DATE_STR = "2026-03-14"
@@ -186,6 +187,8 @@ class VidGadgetApp:
         test_files = [
             # r"D:\_Python\app\vidGadget\bak\Robot.Dreams.mp4",
             # r"D:\_Python\app\vidGadget\bak\down-c.flac",
+            # r"D:\_Python\app\vidGadget\bak\timeF.flac",
+            # r"D:\_Python\app\vidGadget\bak\timeM.flac",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):
@@ -1191,6 +1194,13 @@ class VidGadgetApp:
             )
             return
 
+        if self.process_kind_var.get() == PROC_KIND_NORMALIZATION and not self.check_ffmpeg_normalize():
+            messagebox.showerror(
+                "오류",
+                "ffmpeg-normalize 패키지가 없습니다.\n다음 명령으로 설치하세요:\npip install ffmpeg-normalize",
+            )
+            return
+
         # 쓰레드로 실행
         self.stop_process = False
         self._set_process_button("작업 중지", "red")
@@ -1235,6 +1245,10 @@ class VidGadgetApp:
             # 앱 경로에서 확인
             ffmpeg_path = os.path.join(self.app_path, "ffmpeg.exe")
             return os.path.exists(ffmpeg_path)
+
+    def check_ffmpeg_normalize(self) -> bool:
+        """ffmpeg-normalize 패키지 존재 여부 확인"""
+        return importlib.util.find_spec("ffmpeg_normalize") is not None
 
     # 외부창으로 실행
     def _run_cmd_ext(self, cmd):
@@ -1296,79 +1310,16 @@ class VidGadgetApp:
         print(f"-------------------------------------\n명령 종료:\n {cmd}")
         return process.returncode, output
 
-    def _parse_loudnorm_json(self, output):
-        """loudnorm 1차 분석 JSON 파싱"""
-        match = re.search(r'\{\s*"input_i"\s*:.*?\}', output, re.DOTALL)
-        if not match:
-            raise ValueError("loudnorm 분석 결과 JSON을 찾을 수 없습니다.")
-
-        measured = json.loads(match.group(0))
-        required_keys = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
-        missing_keys = [key for key in required_keys if key not in measured]
-        if missing_keys:
-            raise ValueError(f"loudnorm 분석 결과에 필요한 값이 없습니다: {', '.join(missing_keys)}")
-
-        return measured
-
-    def _get_loudnorm_float(self, measured, key):
-        """loudnorm JSON 값을 실수로 변환"""
-        try:
-            return float(measured[key])
-        except (KeyError, ValueError) as exc:
-            raise ValueError(f"loudnorm {key} 값을 읽을 수 없습니다.") from exc
-
-    def _run_normalization_2pass(self, filename, builder):
-        """loudnorm 2-pass 처리"""
-        analysis_cmd = builder.build_normalization_analysis_command(filename)
-        returncode, output = self._run_cmd_capture(analysis_cmd)
+    def _run_normalization(self, filename, builder):
+        """ffmpeg-normalize 패키지로 Normalization 처리"""
+        cmd = builder.build_normalization_command_args(filename)
+        returncode, output = self._run_cmd_capture(cmd)
 
         if self.stop_process:
             return
         if returncode != 0:
             print(output)
-            raise RuntimeError("loudnorm 1차 분석 명령이 실패했습니다.")
-
-        measured = self._parse_loudnorm_json(output)
-        output_file = builder.get_normalization_output_file(filename)
-        target_tp = builder.get_normalization_target_tp(filename)
-        post_volume_db = 0.0
-        tp_tolerance = 0.05
-
-        for pass_index in range(3):
-            convert_cmd = builder.build_normalization_second_pass_command(
-                filename, measured, post_volume_db=post_volume_db
-            )
-            returncode, output = self._run_cmd_capture(convert_cmd)
-
-            if self.stop_process:
-                return
-            if returncode != 0:
-                print(output)
-                raise RuntimeError("loudnorm 2차 변환 명령이 실패했습니다.")
-
-            check_cmd = builder.build_normalization_analysis_command(output_file)
-            returncode, output = self._run_cmd_capture(check_cmd)
-
-            if self.stop_process:
-                return
-            if returncode != 0:
-                print(output)
-                raise RuntimeError("Normalization 출력 파일 분석 명령이 실패했습니다.")
-
-            output_measured = self._parse_loudnorm_json(output)
-            output_tp = self._get_loudnorm_float(output_measured, "input_tp")
-            tp_delta = target_tp - output_tp
-            print(
-                f"Normalization TP 확인: target={target_tp:.2f}, "
-                f"output={output_tp:.2f}, delta={tp_delta:.2f}"
-            )
-
-            if abs(tp_delta) <= tp_tolerance:
-                return
-
-            post_volume_db += tp_delta
-
-        print(f"Warning: True Peak가 목표값과 {abs(tp_delta):.2f} dB 차이납니다.")
+            raise RuntimeError("ffmpeg-normalize 명령이 실패했습니다.")
 
     def do_process(self):
         """실제 처리 작업"""
@@ -1431,7 +1382,7 @@ class VidGadgetApp:
                             text=f"분석/정규화 중 ({current}/{total}): {f}"
                         ),
                     )
-                    self._run_normalization_2pass(filename, builder)
+                    self._run_normalization(filename, builder)
                     continue
 
                 # 자막 추출은 트랙별 개별 명령어

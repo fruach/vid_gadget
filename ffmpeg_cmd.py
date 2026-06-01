@@ -5,6 +5,9 @@ C++ CmdGet 함수 포팅
 
 import os
 import re
+import json
+import subprocess
+import sys
 from typing import Optional
 from dataclasses import dataclass
 
@@ -52,6 +55,8 @@ CODEC_MP3 = 8
 CODEC_OGG = 9
 CODEC_OPUS = 10
 CODEC_AAC = 11
+
+AUDIO_OUTPUT_CODECS = {CODEC_WAV, CODEC_FLAC, CODEC_MP3, CODEC_OGG, CODEC_OPUS, CODEC_AAC}
 
 
 class FFmpegCommandBuilder:
@@ -177,89 +182,114 @@ class FFmpegCommandBuilder:
             cmd += " & pause"
         return cmd
 
-    def _get_normalization_parts(self, input_file: str) -> tuple:
+    def _get_normalization_config(self, input_file: str) -> tuple:
         output_codec = self.settings.get("output_codec", CODEC_265)
         if self._normalization_output_file is None:
             self._normalization_output_file = get_output_filename(
                 input_file, output_codec, self.settings, self.media_info
             )
         output_file = self._normalization_output_file
-        codec_cmd = ""
-        loudnorm_cmd = 'loudnorm=I=-14:TP=-1.0:LRA=11'
+        true_peak = -1.0
 
-        if output_codec in [CODEC_WAV, CODEC_FLAC, CODEC_MP3, CODEC_OGG, CODEC_OPUS, CODEC_AAC]:
-            loudnorm_cmd = 'loudnorm=I=-13:TP=-0.8:LRA=8'
-            self._determine_format_dest(output_codec)
-            audio_codec = self._get_audio_codec(output_codec)
-            audio_sample = self.settings.get("audio_sample", 160)
-            cbr = self.settings.get("cbr", False)
-            audio_quality = self._get_audio_quality_for_track(output_codec, audio_sample, cbr)
-            codec_cmd = f"-c:a {audio_codec} {audio_quality}"
+        if output_codec in AUDIO_OUTPUT_CODECS:
+            true_peak = -0.8
 
-        return loudnorm_cmd, codec_cmd, output_file
+        return true_peak, output_file
 
     def get_normalization_output_file(self, input_file: str) -> str:
         """Normalization 출력 파일명"""
-        _, _, output_file = self._get_normalization_parts(input_file)
+        _, output_file = self._get_normalization_config(input_file)
         return output_file
 
-    def get_normalization_target_tp(self, input_file: str) -> float:
-        """Normalization 목표 True Peak"""
-        loudnorm_cmd, _, _ = self._get_normalization_parts(input_file)
-        match = re.search(r"(?:^|:)TP=([-+]?\d+(?:\.\d+)?)", loudnorm_cmd)
-        if not match:
-            raise ValueError("loudnorm TP 값을 찾을 수 없습니다.")
-        return float(match.group(1))
+    def _get_normalization_audio_options(self) -> tuple:
+        output_codec = self.settings.get("output_codec", CODEC_265)
+        audio_sample = self.settings.get("audio_sample", 160)
+        cbr = self.settings.get("cbr", False)
+        extra_options = []
+        bitrate = None
+        audio_codec = "aac"
 
-    def build_normalization_analysis_command(self, input_file: str) -> str:
-        """loudnorm 1차 분석 명령어"""
-        loudnorm_cmd, _, _ = self._get_normalization_parts(input_file)
-        cmd = f'ffmpeg -i "{input_file}" -af "{loudnorm_cmd}:print_format=json" -f null -'
-        return re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
+        if output_codec == CODEC_WAV:
+            audio_codec = "pcm_s16le"
+        elif output_codec == CODEC_FLAC:
+            audio_codec = "flac"
+            extra_options.extend(["-sample_fmt", "s16", "-bits_per_raw_sample", "16"])
+        elif output_codec == CODEC_MP3 or self.settings.get("mp3", False):
+            audio_codec = "libmp3lame"
+            if cbr:
+                bitrate = f"{audio_sample}k"
+            else:
+                quality = audio_sample if 1 <= audio_sample <= 9 else 2
+                extra_options.extend(["-q:a", str(quality)])
+        elif output_codec == CODEC_OGG:
+            audio_codec = "libvorbis"
+            extra_options.extend(["-q:a", "6"])
+        elif output_codec == CODEC_OPUS:
+            audio_codec = "libopus"
+            bitrate = "160k"
+            extra_options.extend(["-vbr", "on"])
+        elif output_codec == CODEC_AAC or self.settings.get("aac", True) or self.settings.get("mp4", False):
+            audio_codec = "aac"
+            extra_options.extend(["-q:a", "1"])
+        elif not self.settings.get("mkv", False):
+            audio_codec = "aac"
+            extra_options.extend(["-q:a", "1"])
+        else:
+            audio_codec = "libvorbis"
+            extra_options.extend(["-q:a", "6"])
 
-    def build_normalization_second_pass_command(
-        self, input_file: str, measured: dict, add_pause: bool = False, post_volume_db: float = 0.0
-    ) -> str:
-        """loudnorm 2차 변환 명령어"""
-        loudnorm_cmd, codec_cmd, output_file = self._get_normalization_parts(input_file)
-        try:
-            target_offset = f"{float(measured['target_offset']):.6f}"
-        except ValueError:
-            target_offset = measured["target_offset"]
-        loudnorm_cmd = (
-            f"{loudnorm_cmd}:"
-            f"measured_I={measured['input_i']}:"
-            f"measured_TP={measured['input_tp']}:"
-            f"measured_LRA={measured['input_lra']}:"
-            f"measured_thresh={measured['input_thresh']}:"
-            f"offset={target_offset}:"
-            f"linear=true"
+        sample_rate = None
+        if self.settings.get("sampling_rate_check", True):
+            sample_rate = self.settings.get("sampling_rate", 48000)
+
+        audio_channels = 2 if self.settings.get("ch2", False) else None
+        video_disable = output_codec in AUDIO_OUTPUT_CODECS
+        return audio_codec, bitrate, sample_rate, audio_channels, extra_options, video_disable
+
+    def build_normalization_command_args(self, input_file: str) -> list:
+        """ffmpeg-normalize 실행 인자"""
+        true_peak, output_file = self._get_normalization_config(input_file)
+        audio_codec, bitrate, sample_rate, audio_channels, extra_options, video_disable = (
+            self._get_normalization_audio_options()
         )
-        filter_cmd = loudnorm_cmd
-        if post_volume_db:
-            filter_cmd = f"{filter_cmd},volume={post_volume_db:.6f}dB"
 
-        cmd = f'ffmpeg -y -i "{input_file}" -af "{filter_cmd}" {codec_cmd} "{output_file}"'
-        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
-        if add_pause:
-            cmd += " & pause"
-        return cmd
+        args = [
+            sys.executable,
+            "-m",
+            "ffmpeg_normalize",
+            input_file,
+            "-o",
+            output_file,
+            "-f",
+            "-nt",
+            "peak",
+            "-t",
+            f"{true_peak:g}",
+            "-c:a",
+            audio_codec,
+        ]
+
+        if not video_disable:
+            args.extend(["-c:v", "copy"])
+        else:
+            args.append("-vn")
+        if bitrate:
+            args.extend(["-b:a", bitrate])
+        if sample_rate:
+            args.extend(["-ar", str(sample_rate)])
+        if audio_channels:
+            args.extend(["-ac", str(audio_channels)])
+        if extra_options:
+            args.extend(["-e", json.dumps(extra_options)])
+
+        return args
 
     def _build_normalization_command(self, input_file: str, add_pause: bool = False) -> str:
         """오디오 Normalization 명령어 미리보기"""
-        analysis_cmd = self.build_normalization_analysis_command(input_file)
-        second_pass_cmd = self.build_normalization_second_pass_command(
-            input_file,
-            {
-                "input_i": "<input_i>",
-                "input_tp": "<input_tp>",
-                "input_lra": "<input_lra>",
-                "input_thresh": "<input_thresh>",
-                "target_offset": "<target_offset>",
-            },
-            add_pause,
-        )
-        return f"{analysis_cmd}\n{second_pass_cmd}"
+        cmd = subprocess.list2cmdline(self.build_normalization_command_args(input_file))
+        if add_pause:
+            cmd += " & pause"
+        return cmd
 
     def _build_convert_command(self, input_file: str, add_pause: bool = True) -> str:
         """변환 명령어 생성"""

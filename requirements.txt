@@ -9,5 +9,8 @@ tkinterdnd2>=0.3.0
 # 미디어 정보 파싱 (선택사항 - mediainfo.exe 없을 때 사용)
 pymediainfo>=6.0.0
 
+# 오디오 Normalization (FFmpeg loudnorm 2-pass 래퍼)
+ffmpeg-normalize>=1.37.8
+
 # 빌드/배포
 # pyinstaller>=6.0.0
