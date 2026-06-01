@@ -39,6 +39,7 @@ PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
 PROC_KIND_EXTRACT_SUB = 6
 PROC_KIND_DELETE_TAGS = 7
+PROC_KIND_NORMALIZATION = 8
 
 # 포맷 상수
 FORMAT_VIDEO = 1
@@ -60,6 +61,7 @@ class FFmpegCommandBuilder:
         self.settings = settings
         self.media_info = media_info
         self.format_dest = FORMAT_VIDEO
+        self._normalization_output_file = None
         # range_copy는 range가 활성일 때만 유효 (C++ CmdGet 동작과 일치)
         self._range_copy = self.settings.get("range", False) and self.settings.get("range_copy", False)
 
@@ -74,6 +76,10 @@ class FFmpegCommandBuilder:
         # 태그 삭제
         if process_kind == PROC_KIND_DELETE_TAGS:
             return self._build_delete_tags_command(input_file, add_pause)
+
+        # Normalization
+        if process_kind == PROC_KIND_NORMALIZATION:
+            return self._build_normalization_command(input_file, add_pause)
 
         # 합치기 (영상 + 소리)
         if process_kind == PROC_KIND_MERGE_VA:
@@ -151,14 +157,109 @@ class FFmpegCommandBuilder:
         """오디오 파일 태그 삭제 명령어"""
         output_codec = self.settings.get("output_codec", CODEC_265)
         output_file = get_output_filename(input_file, output_codec, self.settings, self.media_info)
+        audio_output_codecs = (CODEC_WAV, CODEC_FLAC, CODEC_MP3, CODEC_OGG, CODEC_OPUS, CODEC_AAC)
+
+        codec_cmd = "-c:a copy"
+        if output_codec in audio_output_codecs:
+            self._determine_format_dest(output_codec)
+            audio_codec = self._get_audio_codec(output_codec)
+            audio_sample = self.settings.get("audio_sample", 160)
+            cbr = self.settings.get("cbr", False)
+            audio_quality = self._get_audio_quality_for_track(output_codec, audio_sample, cbr)
+            codec_cmd = f"-c:a {audio_codec} {audio_quality}"
 
         cmd = (
-            f'ffmpeg -y -i "{input_file}" -map 0:a -c:a copy '
+            f'ffmpeg -y -i "{input_file}" -map 0:a {codec_cmd} '
             f'-map_metadata -1 -map_metadata:s:a -1 -map_chapters -1 -bitexact "{output_file}"'
         )
+        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
         if add_pause:
             cmd += " & pause"
         return cmd
+
+    def _get_normalization_parts(self, input_file: str) -> tuple:
+        output_codec = self.settings.get("output_codec", CODEC_265)
+        if self._normalization_output_file is None:
+            self._normalization_output_file = get_output_filename(
+                input_file, output_codec, self.settings, self.media_info
+            )
+        output_file = self._normalization_output_file
+        codec_cmd = ""
+        loudnorm_cmd = 'loudnorm=I=-14:TP=-1.0:LRA=11'
+
+        if output_codec in [CODEC_WAV, CODEC_FLAC, CODEC_MP3, CODEC_OGG, CODEC_OPUS, CODEC_AAC]:
+            loudnorm_cmd = 'loudnorm=I=-13:TP=-0.8:LRA=8'
+            self._determine_format_dest(output_codec)
+            audio_codec = self._get_audio_codec(output_codec)
+            audio_sample = self.settings.get("audio_sample", 160)
+            cbr = self.settings.get("cbr", False)
+            audio_quality = self._get_audio_quality_for_track(output_codec, audio_sample, cbr)
+            codec_cmd = f"-c:a {audio_codec} {audio_quality}"
+
+        return loudnorm_cmd, codec_cmd, output_file
+
+    def get_normalization_output_file(self, input_file: str) -> str:
+        """Normalization 출력 파일명"""
+        _, _, output_file = self._get_normalization_parts(input_file)
+        return output_file
+
+    def get_normalization_target_tp(self, input_file: str) -> float:
+        """Normalization 목표 True Peak"""
+        loudnorm_cmd, _, _ = self._get_normalization_parts(input_file)
+        match = re.search(r"(?:^|:)TP=([-+]?\d+(?:\.\d+)?)", loudnorm_cmd)
+        if not match:
+            raise ValueError("loudnorm TP 값을 찾을 수 없습니다.")
+        return float(match.group(1))
+
+    def build_normalization_analysis_command(self, input_file: str) -> str:
+        """loudnorm 1차 분석 명령어"""
+        loudnorm_cmd, _, _ = self._get_normalization_parts(input_file)
+        cmd = f'ffmpeg -i "{input_file}" -af "{loudnorm_cmd}:print_format=json" -f null -'
+        return re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
+
+    def build_normalization_second_pass_command(
+        self, input_file: str, measured: dict, add_pause: bool = False, post_volume_db: float = 0.0
+    ) -> str:
+        """loudnorm 2차 변환 명령어"""
+        loudnorm_cmd, codec_cmd, output_file = self._get_normalization_parts(input_file)
+        try:
+            target_offset = f"{float(measured['target_offset']):.6f}"
+        except ValueError:
+            target_offset = measured["target_offset"]
+        loudnorm_cmd = (
+            f"{loudnorm_cmd}:"
+            f"measured_I={measured['input_i']}:"
+            f"measured_TP={measured['input_tp']}:"
+            f"measured_LRA={measured['input_lra']}:"
+            f"measured_thresh={measured['input_thresh']}:"
+            f"offset={target_offset}:"
+            f"linear=true"
+        )
+        filter_cmd = loudnorm_cmd
+        if post_volume_db:
+            filter_cmd = f"{filter_cmd},volume={post_volume_db:.6f}dB"
+
+        cmd = f'ffmpeg -y -i "{input_file}" -af "{filter_cmd}" {codec_cmd} "{output_file}"'
+        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
+        if add_pause:
+            cmd += " & pause"
+        return cmd
+
+    def _build_normalization_command(self, input_file: str, add_pause: bool = False) -> str:
+        """오디오 Normalization 명령어 미리보기"""
+        analysis_cmd = self.build_normalization_analysis_command(input_file)
+        second_pass_cmd = self.build_normalization_second_pass_command(
+            input_file,
+            {
+                "input_i": "<input_i>",
+                "input_tp": "<input_tp>",
+                "input_lra": "<input_lra>",
+                "input_thresh": "<input_thresh>",
+                "target_offset": "<target_offset>",
+            },
+            add_pause,
+        )
+        return f"{analysis_cmd}\n{second_pass_cmd}"
 
     def _build_convert_command(self, input_file: str, add_pause: bool = True) -> str:
         """변환 명령어 생성"""
@@ -202,7 +303,7 @@ class FFmpegCommandBuilder:
         cmd = f'ffmpeg {video_codec_input} -y {range_start1} -i "{input_file}" {range_start2} {range_end} {video_cmd} {cfr_cmd} {audio_cmd} {sub_cmd} "{output_file}"'
 
         # 불필요한 공백 제거 (따옴표 안의 공백은 보존)
-        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else ' ', cmd)
+        cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
         if add_pause:
             cmd += " & pause"
 

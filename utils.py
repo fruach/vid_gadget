@@ -116,7 +116,9 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
     # 출력 확장자 결정
     new_ext = ext
 
-    if process_kind != 7:  # PROC_KIND_DELETE_TAGS
+    audio_output_codecs = {CODEC_WAV, CODEC_FLAC, CODEC_MP3, CODEC_OGG, CODEC_OPUS, CODEC_AAC}
+
+    if process_kind != 7 or output_codec in audio_output_codecs:  # PROC_KIND_DELETE_TAGS
         # 포맷 강제 지정
         if settings.get("mp4", False):
             new_ext = "mp4"
@@ -139,7 +141,7 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
 
         if output_codec in codec_extensions:
             new_ext = codec_extensions[output_codec]
-        elif output_codec in [CODEC_264, CODEC_265]:
+        elif process_kind != 7 and output_codec in [CODEC_264, CODEC_265]:
             # 비디오 코덱인데 비디오 확장자가 아닌 경우
             if new_ext not in ["mp4", "mkv"]:
                 new_ext = "mp4"
@@ -170,6 +172,9 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
     if match:
         start_num = int(match.group(1))
         name = name[: match.start()]
+
+    if process_kind == 8:  # PROC_KIND_NORMALIZATION
+        name = f"{name}-n"
 
     # 중복 파일 확인
     output_file = f"{name}.{new_ext}"

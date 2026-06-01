@@ -44,6 +44,7 @@ PROC_KIND_MERGE = 4
 PROC_KIND_MERGE_VA = 5
 PROC_KIND_EXTRACT_SUB = 6
 PROC_KIND_DELETE_TAGS = 7
+PROC_KIND_NORMALIZATION = 8
 
 # 코덱 상수
 CODEC_UNKNOWN = 0
@@ -183,10 +184,8 @@ class VidGadgetApp:
         """프로젝트 초기화 작업"""
         print("start")
         test_files = [
-            # r"D:\_Python\app\vidGadget\bak\rain.wav",
-            # r"D:\_Python\app\vidGadget\bak\rain.flac",
-            # r"D:\_Python\app\vidGadget\bak\rain.mp3",
             # r"D:\_Python\app\vidGadget\bak\Robot.Dreams.mp4",
+            # r"D:\_Python\app\vidGadget\bak\down-c.flac",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):
@@ -719,6 +718,14 @@ class VidGadgetApp:
         frame.pack(fill=tk.X, pady=2)
 
         # 라디오 버튼들 세로 배치 (C++ 원본과 동일)
+        rb_norm = ttk.Radiobutton(
+            frame,
+            text="Normalization",
+            variable=self.process_kind_var,
+            value=PROC_KIND_NORMALIZATION,
+            command=self.on_process_change,
+        )
+        rb_norm.pack(anchor=tk.W)
         rb_dt = ttk.Radiobutton(
             frame,
             text="태그 삭제",
@@ -776,6 +783,7 @@ class VidGadgetApp:
         )
         rb_c.pack(anchor=tk.W)
 
+        self._create_tooltip(rb_norm, "오디오 음량을 -0.8dB로 Normalization 처리")
         self._create_tooltip(rb_dt, "오디오 파일의 메타데이터, 가사, 챕터, 커버 이미지 제거")
         self._create_tooltip(rb_ev, "비디오 스트림만 추출 (오디오 제외)")
         self._create_tooltip(rb_ea, "오디오 스트림만 추출 (비디오 제외)")
@@ -1148,6 +1156,11 @@ class VidGadgetApp:
             self.media_info = MediaInfo.get_info(filename, self.app_path)
 
         if self.media_info:
+            if settings["process_kind"] == PROC_KIND_NORMALIZATION and self.media_info.audio_count == 0:
+                self.cmd_text.delete(1.0, tk.END)
+                self.cmd_text.insert(tk.END, "echo Normalization은 오디오 트랙이 있는 파일만 지원합니다.")
+                return
+
             builder = FFmpegCommandBuilder(settings, self.media_info)
             cmd = builder.build_command(filename)
 
@@ -1258,6 +1271,105 @@ class VidGadgetApp:
             with self.process_lock:
                 self.current_process = None
 
+    def _run_cmd_capture(self, cmd):
+        """명령 실행 결과를 문자열로 반환"""
+        print(f"Running command: {cmd}")
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+
+        with self.process_lock:
+            self.current_process = process
+
+        stdout, stderr = process.communicate()
+
+        with self.process_lock:
+            if self.current_process == process:
+                self.current_process = None
+
+        output = (stdout or "") + "\n" + (stderr or "")
+        print(f"-------------------------------------\n명령 종료:\n {cmd}")
+        return process.returncode, output
+
+    def _parse_loudnorm_json(self, output):
+        """loudnorm 1차 분석 JSON 파싱"""
+        match = re.search(r'\{\s*"input_i"\s*:.*?\}', output, re.DOTALL)
+        if not match:
+            raise ValueError("loudnorm 분석 결과 JSON을 찾을 수 없습니다.")
+
+        measured = json.loads(match.group(0))
+        required_keys = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+        missing_keys = [key for key in required_keys if key not in measured]
+        if missing_keys:
+            raise ValueError(f"loudnorm 분석 결과에 필요한 값이 없습니다: {', '.join(missing_keys)}")
+
+        return measured
+
+    def _get_loudnorm_float(self, measured, key):
+        """loudnorm JSON 값을 실수로 변환"""
+        try:
+            return float(measured[key])
+        except (KeyError, ValueError) as exc:
+            raise ValueError(f"loudnorm {key} 값을 읽을 수 없습니다.") from exc
+
+    def _run_normalization_2pass(self, filename, builder):
+        """loudnorm 2-pass 처리"""
+        analysis_cmd = builder.build_normalization_analysis_command(filename)
+        returncode, output = self._run_cmd_capture(analysis_cmd)
+
+        if self.stop_process:
+            return
+        if returncode != 0:
+            print(output)
+            raise RuntimeError("loudnorm 1차 분석 명령이 실패했습니다.")
+
+        measured = self._parse_loudnorm_json(output)
+        output_file = builder.get_normalization_output_file(filename)
+        target_tp = builder.get_normalization_target_tp(filename)
+        post_volume_db = 0.0
+        tp_tolerance = 0.05
+
+        for pass_index in range(3):
+            convert_cmd = builder.build_normalization_second_pass_command(
+                filename, measured, post_volume_db=post_volume_db
+            )
+            returncode, output = self._run_cmd_capture(convert_cmd)
+
+            if self.stop_process:
+                return
+            if returncode != 0:
+                print(output)
+                raise RuntimeError("loudnorm 2차 변환 명령이 실패했습니다.")
+
+            check_cmd = builder.build_normalization_analysis_command(output_file)
+            returncode, output = self._run_cmd_capture(check_cmd)
+
+            if self.stop_process:
+                return
+            if returncode != 0:
+                print(output)
+                raise RuntimeError("Normalization 출력 파일 분석 명령이 실패했습니다.")
+
+            output_measured = self._parse_loudnorm_json(output)
+            output_tp = self._get_loudnorm_float(output_measured, "input_tp")
+            tp_delta = target_tp - output_tp
+            print(
+                f"Normalization TP 확인: target={target_tp:.2f}, "
+                f"output={output_tp:.2f}, delta={tp_delta:.2f}"
+            )
+
+            if abs(tp_delta) <= tp_tolerance:
+                return
+
+            post_volume_db += tp_delta
+
+        print(f"Warning: True Peak가 목표값과 {abs(tp_delta):.2f} dB 차이납니다.")
+
     def do_process(self):
         """실제 처리 작업"""
         status_text = "완료"
@@ -1298,9 +1410,9 @@ class VidGadgetApp:
                 if process_kind == PROC_KIND_DELETE_TAGS and not is_tag_delete_audio_file(filename):
                     continue
 
-                # 오디오 추출 시 오디오 트랙이 없으면 건너뛰기
+                # 오디오 작업 시 오디오 트랙이 없으면 건너뛰기
                 if (
-                    process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS)
+                    process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS, PROC_KIND_NORMALIZATION)
                     and media_info.audio_count == 0
                 ):
                     continue
@@ -1311,6 +1423,16 @@ class VidGadgetApp:
 
                 # 명령어 생성
                 builder = FFmpegCommandBuilder(settings, media_info)
+
+                if process_kind == PROC_KIND_NORMALIZATION:
+                    self.root.after(
+                        0,
+                        lambda f=filename, current=i + 1, total=total_files: self.status_label.config(
+                            text=f"분석/정규화 중 ({current}/{total}): {f}"
+                        ),
+                    )
+                    self._run_normalization_2pass(filename, builder)
+                    continue
 
                 # 자막 추출은 트랙별 개별 명령어
                 if process_kind == PROC_KIND_EXTRACT_SUB:
