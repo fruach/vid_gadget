@@ -14,8 +14,8 @@ import json
 import re
 import importlib.util
 
-_VERSION_STR = "1.43"
-_BUILD_DATE_STR = "2026-03-14"
+_VERSION_STR = "1.44"
+_BUILD_DATE_STR = "2026-06-29"
 # 드래그 앤 드롭 지원
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -115,7 +115,7 @@ class VidGadgetApp:
         self.root.minsize(950, 600)
 
         # 아이콘 설정
-        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vidgadget_py.ico")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vidgadget.ico")
         if os.path.exists(icon_path):
             self.root.iconbitmap(icon_path)
 

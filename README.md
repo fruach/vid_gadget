@@ -2,22 +2,29 @@
 
 <img src="vidGadget-ss.png" width="500">
 
-FFmpeg 기반 비디오/오디오 변환 GUI 도구 (Python/Tkinter)
+FFmpeg 기반 비디오/오디오 변환 GUI 도구 
 
 ## 주요 기능
 
 - **비디오 변환**: H.264, H.265(HEVC), AV1, GIF, WEBP 등
 - **오디오 변환**: MP3, AAC, OGG, OPUS, WAV, FLAC 등
-- **추출**: 동영상에서 영상만 또는 소리만 추출
-- **합치기**: 여러 동영상 합치기, 영상+소리 합치기
+- **추출**: 동영상에서 영상만, 소리만, 자막만 추출
+- **합치기**: 여러 동영상 합치기, 영상/사진+소리 합치기
+- **오디오 도구**: Normalization, 태그/메타데이터 삭제
 - **구간 편집**: 특정 구간만 추출
 - **GPU 가속**: NVIDIA NVENC 지원
-- **해상도 변경**: 720p, 1080p 등
+- **해상도/프레임 처리**: 720p, 1080p, VFR 감지 및 CFR 변환 등
 
 ## 요구사항
 
 - Python 3.8+
 - FFmpeg (PATH에 등록 또는 같은 폴더에 위치)
+- Python 패키지: `requirements.txt` 참고
+
+선택사항:
+- MediaInfo (`mediainfo.exe`): 미디어 정보 분석용. 없으면 `pymediainfo`/`ffprobe`를 사용합니다.
+- `tkinterdnd2`: 드래그 앤 드롭 지원
+- `ffmpeg-normalize`: Normalization 작업에 필요
 
 
 ## 설치
@@ -82,8 +89,14 @@ pip install -r requirements.txt
 ```
 
 ## 실행
-```
+```bash
 vidGadget.bat
+```
+
+또는 직접 실행:
+
+```bash
+python vidgadget.py
 ```
 
 ## 사용법
@@ -92,4 +105,3 @@ vidGadget.bat
 2. 코덱, 품질, 해상도 등 옵션 설정
 3. 작업 종류 선택 (변환, 추출, 합치기)
 4. "작업 실행" 클릭
-
