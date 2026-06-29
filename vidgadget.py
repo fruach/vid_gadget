@@ -31,6 +31,7 @@ from ffmpeg_cmd import FFmpegCommandBuilder
 from utils import (
     is_video_file,
     is_audio_file,
+    is_image_file,
     is_tag_delete_audio_file,
     get_extension,
     get_output_filename,
@@ -161,6 +162,8 @@ class VidGadgetApp:
         self.audio_force_encode_var = tk.BooleanVar(value=False)
         self.sampling_rate_check_var = tk.BooleanVar(value=True)
         self.sampling_rate_var = tk.StringVar(value="48kHz")
+        self.audio_bit_depth_check_var = tk.BooleanVar(value=False)
+        self.audio_bit_depth_var = tk.StringVar(value="16bit")
 
         # 구간
         self.range_var = tk.BooleanVar(value=False)
@@ -683,6 +686,32 @@ class VidGadgetApp:
         self._create_tooltip(cb_sr, "체크 시 오디오 샘플링 레이트 변경\n해제 시 원본 샘플링 레이트 유지")
         self._create_tooltip(self.sr_combo, "오디오 샘플링 레이트 설정\n44.1kHz(CD 음질) / 48kHz(기본)")
 
+        # Bit depth
+        bit_depth_frame = ttk.Frame(frame)
+        bit_depth_frame.pack(fill=tk.X)
+
+        self.audio_bit_depth_check = ttk.Checkbutton(
+            bit_depth_frame,
+            text="Bit depth",
+            variable=self.audio_bit_depth_check_var,
+            command=self.on_option_change,
+        )
+        self.audio_bit_depth_check.pack(side=tk.LEFT)
+
+        self.audio_bit_depth_combo = ttk.Combobox(
+            bit_depth_frame,
+            textvariable=self.audio_bit_depth_var,
+            values=["16bit", "24bit", "32bit"],
+            width=7,
+            state="readonly",
+        )
+        self.audio_bit_depth_combo.pack(side=tk.LEFT, padx=(2, 0))
+        self.audio_bit_depth_combo.bind("<<ComboboxSelected>>", self.on_option_change)
+
+        self._create_tooltip(self.audio_bit_depth_check, "WAV/FLAC 변환 시 오디오 비트 깊이 지정")
+        self._create_tooltip(self.audio_bit_depth_combo, "WAV/FLAC 출력 비트 깊이 선택")
+        self.update_audio_bit_depth_state()
+
         # 2채널 변환 | CBR
         row_ch = ttk.Frame(frame)
         row_ch.pack(fill=tk.X)
@@ -771,7 +800,7 @@ class VidGadgetApp:
         rb_m.pack(anchor=tk.W)
         rb_mva = ttk.Radiobutton(
             frame,
-            text="합치기(영상+소리)",
+            text="합치기(영상,사진+소리)",
             variable=self.process_kind_var,
             value=PROC_KIND_MERGE_VA,
             command=self.on_process_change,
@@ -792,7 +821,7 @@ class VidGadgetApp:
         self._create_tooltip(rb_ea, "오디오 스트림만 추출 (비디오 제외)")
         self._create_tooltip(rb_es, "자막 스트림 추출 (SRT, ASS 등)")
         self._create_tooltip(rb_m, "여러 동영상을 하나로 합치기\nTS 변환 후 concat 방식")
-        self._create_tooltip(rb_mva, "별도의 영상 파일과 소리 파일을 합치기")
+        self._create_tooltip(rb_mva, "별도의 영상/사진 파일과 소리 파일을 합치기")
         self._create_tooltip(rb_c, "코덱/해상도/품질 변환 (기본 모드)")
 
         self.process_button = tk.Button(frame, text="작업 실행", command=self.on_process_button)
@@ -812,6 +841,7 @@ class VidGadgetApp:
         """파일 추가"""
         filetypes = [
             ("Video files", "*.mp4 *.mkv *.avi *.webm *.mpg *.mov *.wmv"),
+            ("Image files", "*.jpg *.jpeg *.png *.gif *.webp *.bmp *.tiff *.avif"),
             ("Audio files", "*.mp3 *.aac *.wav *.flac *.ogg *.opus"),
             ("All files", "*.*"),
         ]
@@ -859,13 +889,13 @@ class VidGadgetApp:
     def on_drop_files(self, event):
         """파일 드롭 이벤트 핸들러"""
         # 드롭된 파일 경로 파싱
-        files = self.parse_drop_data(event.data)
+        files = self.expand_drop_paths(self.parse_drop_data(event.data))
+        existing = list(self.file_listbox.get(0, tk.END))
         for filepath in files:
-            if os.path.isfile(filepath):
-                # 중복 방지
-                existing = list(self.file_listbox.get(0, tk.END))
-                if filepath not in existing:
-                    self.file_listbox.insert(tk.END, filepath)
+            # 중복 방지
+            if filepath not in existing:
+                self.file_listbox.insert(tk.END, filepath)
+                existing.append(filepath)
 
         # 첫번째 파일 선택
         if self.file_listbox.size() > 0:
@@ -902,6 +932,19 @@ class VidGadgetApp:
                 cleaned.append(f)
 
         return cleaned
+
+    def expand_drop_paths(self, paths: list) -> list:
+        """드롭된 파일/폴더 경로를 파일 경로 목록으로 확장"""
+        files = []
+        for path in paths:
+            if os.path.isfile(path):
+                files.append(path)
+            elif os.path.isdir(path):
+                for entry in sorted(os.scandir(path), key=lambda e: e.name.lower()):
+                    if entry.is_file():
+                        files.append(entry.path)
+
+        return files
 
     def on_file_select(self, event):
         print("file selected")
@@ -1069,7 +1112,22 @@ class VidGadgetApp:
 
     def on_option_change(self, *args):
         """일반 옵션 변경 이벤트"""
+        self.update_audio_bit_depth_state()
         self.update_command()
+
+    def update_audio_bit_depth_state(self):
+        """Bit depth 옵션 활성화 상태 갱신"""
+        if not hasattr(self, "audio_bit_depth_check"):
+            return
+
+        output_sel = self.output_codec_listbox.curselection()
+        output_codec = OUTPUT_CODEC_LIST[output_sel[0]][1] if output_sel else CODEC_265
+        enabled = output_codec in (CODEC_WAV, CODEC_FLAC)
+        check_state = tk.NORMAL if enabled else tk.DISABLED
+        combo_state = "readonly" if enabled and self.audio_bit_depth_check_var.get() else tk.DISABLED
+
+        self.audio_bit_depth_check.config(state=check_state)
+        self.audio_bit_depth_combo.config(state=combo_state)
 
     def on_process_change(self):
         """작업 종류 변경 이벤트"""
@@ -1121,6 +1179,8 @@ class VidGadgetApp:
             "audio_force_encode": self.audio_force_encode_var.get(),
             "sampling_rate_check": self.sampling_rate_check_var.get(),
             "sampling_rate": 44100 if self.sampling_rate_var.get() == "44.1kHz" else 48000,
+            "audio_bit_depth_check": self.audio_bit_depth_check_var.get(),
+            "audio_bit_depth": int(self.audio_bit_depth_var.get().replace("bit", "")),
             "range": self.range_var.get(),
             "range_copy": self.range_copy_var.get(),
             "range_exact": self.range_exact_var.get(),
@@ -1153,6 +1213,13 @@ class VidGadgetApp:
         if settings["process_kind"] == PROC_KIND_DELETE_TAGS and not is_tag_delete_audio_file(filename):
             self.cmd_text.delete(1.0, tk.END)
             self.cmd_text.insert(tk.END, "echo 태그 삭제는 mp3, flac, wav, opus, aac, ogg 파일만 지원합니다.")
+            return
+
+        if settings["process_kind"] == PROC_KIND_MERGE_VA:
+            builder = FFmpegCommandBuilder(settings, self.media_info or MEDIA_INFO())
+            cmd = builder.build_command(filename)
+            self.cmd_text.delete(1.0, tk.END)
+            self.cmd_text.insert(tk.END, cmd)
             return
 
         if not self.media_info:
@@ -1331,13 +1398,16 @@ class VidGadgetApp:
             process_kind = settings["process_kind"]
             total_files = len(files)
 
-            # 합치기 (영상 + 소리) - 단일 명령으로 처리
+            # 합치기 (영상/사진 + 소리) - 단일 명령으로 처리
             if process_kind == PROC_KIND_MERGE_VA:
-                media_info = MediaInfo.get_info(files[0], self.app_path) if files else None
-                if media_info:
-                    builder = FFmpegCommandBuilder(settings, media_info)
-                    cmd = builder.build_command(files[0])
-                    self._run_cmd(cmd)
+                has_visual_file = any(is_video_file(f) or is_image_file(f) for f in files)
+                has_audio_file = any(is_audio_file(f) for f in files)
+                if not has_visual_file or not has_audio_file:
+                    raise RuntimeError("영상/사진과 소리 파일이 1개씩 필요합니다.")
+
+                builder = FFmpegCommandBuilder(settings, MEDIA_INFO())
+                cmd = builder.build_command(files[0])
+                self._run_cmd(cmd)
                 return
 
             for i, filename in enumerate(files):

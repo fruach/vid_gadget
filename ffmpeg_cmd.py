@@ -32,7 +32,7 @@ from media_info import (
     A_CODEC_FLAC,
     A_CODEC_MKA,
 )
-from utils import get_output_filename, divide_name, is_video_file, is_audio_file
+from utils import get_output_filename, divide_name, is_video_file, is_audio_file, is_image_file
 
 # 프로세스 종류 상수
 PROC_KIND_EXTRACT_VIDEO = 1
@@ -98,22 +98,33 @@ class FFmpegCommandBuilder:
         return self._build_convert_command(input_file, add_pause)
 
     def _build_merge_va_command(self) -> str:
-        """영상 + 소리 합치기 명령어"""
+        """영상/사진 + 소리 합치기 명령어"""
         files = self.settings.get("files", [])
         if len(files) < 2:
             return "echo 합치기위해 최소 두개의 파일이 필요합니다."
 
         vid_file = None
+        image_file = None
         audio_file = None
 
         for f in files:
             if is_video_file(f) and not vid_file:
                 vid_file = f
+            elif is_image_file(f) and not image_file:
+                image_file = f
             elif is_audio_file(f) and not audio_file:
                 audio_file = f
 
-        if not vid_file or not audio_file:
-            return "echo 영상과 소리 파일이 1개씩 필요합니다."
+        if not audio_file or (not vid_file and not image_file):
+            return "echo 영상/사진과 소리 파일이 1개씩 필요합니다."
+
+        if image_file and not vid_file:
+            out_file = get_output_filename(image_file, CODEC_264)
+            return (
+                f'ffmpeg -loop 1 -i "{image_file}" -i "{audio_file}" '
+                f'-c:v libx264 -tune stillimage -c:a aac -b:a 160k '
+                f'-pix_fmt yuv420p -shortest "{out_file}"'
+            )
 
         out_file = get_output_filename(vid_file, self.settings.get("output_codec", CODEC_265))
 
@@ -192,7 +203,7 @@ class FFmpegCommandBuilder:
         true_peak = -1.0
 
         if output_codec in AUDIO_OUTPUT_CODECS:
-            true_peak = -0.8
+            true_peak = -0.6
 
         return true_peak, output_file
 
@@ -210,10 +221,10 @@ class FFmpegCommandBuilder:
         audio_codec = "aac"
 
         if output_codec == CODEC_WAV:
-            audio_codec = "pcm_s16le"
+            audio_codec = self._get_wav_audio_codec()
         elif output_codec == CODEC_FLAC:
             audio_codec = "flac"
-            extra_options.extend(["-sample_fmt", "s16", "-bits_per_raw_sample", "16"])
+            extra_options.extend(self._get_flac_bit_depth_options())
         elif output_codec == CODEC_MP3 or self.settings.get("mp3", False):
             audio_codec = "libmp3lame"
             if cbr:
@@ -608,6 +619,33 @@ class FFmpegCommandBuilder:
             A_CODEC_AC3,
         }
 
+    def _get_audio_bit_depth(self) -> Optional[int]:
+        """사용자가 선택한 오디오 비트 깊이"""
+        if not self.settings.get("audio_bit_depth_check", False):
+            return None
+
+        bit_depth = self.settings.get("audio_bit_depth", 24)
+        if bit_depth in (16, 24, 32):
+            return bit_depth
+        return 24
+
+    def _get_wav_audio_codec(self) -> str:
+        """WAV 비트 깊이에 맞는 PCM 코덱"""
+        bit_depth = self._get_audio_bit_depth()
+        codec_by_depth = {
+            16: "pcm_s16le",
+            24: "pcm_s24le",
+            32: "pcm_s32le",
+        }
+        return codec_by_depth.get(bit_depth, "pcm_s16le")
+
+    def _get_flac_bit_depth_options(self) -> list:
+        """FLAC 비트 깊이 옵션"""
+        bit_depth = self._get_audio_bit_depth() or 24
+
+        sample_fmt = "s16" if bit_depth == 16 else "s32"
+        return ["-sample_fmt", sample_fmt, "-bits_per_raw_sample", str(bit_depth)]
+
     def _get_audio_codec(self, output_codec: int) -> str:
         """오디오 코덱 결정"""
         aac = self.settings.get("aac", True)
@@ -620,9 +658,10 @@ class FFmpegCommandBuilder:
             ar_opt = f" -ar {ar}"
 
         if output_codec == CODEC_WAV:
-            return f"pcm_s16le -vn{ar_opt}"
+            return f"{self._get_wav_audio_codec()} -vn{ar_opt}"
         elif output_codec == CODEC_FLAC:
-            return f"flac -vn{ar_opt} -sample_fmt s16 -bits_per_raw_sample 16"
+            bit_depth_options = " ".join(self._get_flac_bit_depth_options())
+            return f"flac -vn{ar_opt} {bit_depth_options}".rstrip()
         elif output_codec == CODEC_MP3:
             return f"libmp3lame -vn{ar_opt}"
         elif output_codec == CODEC_OGG:

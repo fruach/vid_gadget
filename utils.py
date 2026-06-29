@@ -173,7 +173,7 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
         start_num = int(match.group(1))
         name = name[: match.start()]
 
-    if process_kind == 8:  # PROC_KIND_NORMALIZATION
+    if process_kind == 8 and not name.endswith("-n"):  # PROC_KIND_NORMALIZATION
         name = f"{name}-n"
 
     # 중복 파일 확인
