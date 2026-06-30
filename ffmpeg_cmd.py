@@ -70,7 +70,7 @@ class FFmpegCommandBuilder:
         # range_copy는 range가 활성일 때만 유효 (C++ CmdGet 동작과 일치)
         self._range_copy = self.settings.get("range", False) and self.settings.get("range_copy", False)
 
-    def build_command(self, input_file: str, add_pause: bool = False) -> str:
+    def build_command(self, input_file: str) -> str:
         """FFmpeg 명령어 생성"""
         process_kind = self.settings.get("process_kind", PROC_KIND_CONVERT)
 
@@ -80,11 +80,11 @@ class FFmpegCommandBuilder:
 
         # 태그 삭제
         if process_kind == PROC_KIND_DELETE_TAGS:
-            return self._build_delete_tags_command(input_file, add_pause)
+            return self._build_delete_tags_command(input_file)
 
         # Normalization
         if process_kind == PROC_KIND_NORMALIZATION:
-            return self._build_normalization_command(input_file, add_pause)
+            return self._build_normalization_command(input_file)
 
         # 합치기 (영상 + 소리)
         if process_kind == PROC_KIND_MERGE_VA:
@@ -95,7 +95,7 @@ class FFmpegCommandBuilder:
             return self._build_merge_command(input_file)
 
         # 일반 변환/추출
-        return self._build_convert_command(input_file, add_pause)
+        return self._build_convert_command(input_file)
 
     def _build_merge_va_command(self) -> str:
         """영상/사진 + 소리 합치기 명령어"""
@@ -128,9 +128,7 @@ class FFmpegCommandBuilder:
 
         out_file = get_output_filename(vid_file, self.settings.get("output_codec", CODEC_265))
 
-        return (
-            f'ffmpeg -i "{vid_file}" -i "{audio_file}" -map 0 -map 1 -c copy -strict -2 "{out_file}" & pause'
-        )
+        return f'ffmpeg -i "{vid_file}" -i "{audio_file}" -map 0 -map 1 -c copy -strict -2 "{out_file}"'
 
     def _build_merge_command(self, input_file: str) -> str:
         """동영상 합치기 명령어 (ts 변환)"""
@@ -169,7 +167,7 @@ class FFmpegCommandBuilder:
 
         return commands
 
-    def _build_delete_tags_command(self, input_file: str, add_pause: bool = False) -> str:
+    def _build_delete_tags_command(self, input_file: str) -> str:
         """오디오 파일 태그 삭제 명령어"""
         output_codec = self.settings.get("output_codec", CODEC_265)
         output_file = get_output_filename(input_file, output_codec, self.settings, self.media_info)
@@ -189,8 +187,6 @@ class FFmpegCommandBuilder:
             f'-map_metadata -1 -map_metadata:s:a -1 -map_chapters -1 -bitexact "{output_file}"'
         )
         cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
-        if add_pause:
-            cmd += " & pause"
         return cmd
 
     def _get_normalization_config(self, input_file: str) -> tuple:
@@ -295,14 +291,12 @@ class FFmpegCommandBuilder:
 
         return args
 
-    def _build_normalization_command(self, input_file: str, add_pause: bool = False) -> str:
+    def _build_normalization_command(self, input_file: str) -> str:
         """오디오 Normalization 명령어 미리보기"""
         cmd = subprocess.list2cmdline(self.build_normalization_command_args(input_file))
-        if add_pause:
-            cmd += " & pause"
         return cmd
 
-    def _build_convert_command(self, input_file: str, add_pause: bool = True) -> str:
+    def _build_convert_command(self, input_file: str) -> str:
         """변환 명령어 생성"""
         output_codec = self.settings.get("output_codec", CODEC_265)
         process_kind = self.settings.get("process_kind", PROC_KIND_CONVERT)
@@ -345,9 +339,6 @@ class FFmpegCommandBuilder:
 
         # 불필요한 공백 제거 (따옴표 안의 공백은 보존)
         cmd = re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
-        if add_pause:
-            cmd += " & pause"
-
         return cmd
 
     def _determine_format_dest(self, output_codec: int):
@@ -776,7 +767,7 @@ class FFmpegCommandBuilder:
 
         concat_str = "|".join(ts_files)
 
-        return f'ffmpeg -y -i "concat:{concat_str}" -c copy "{output_file}" & pause'
+        return f'ffmpeg -y -i "concat:{concat_str}" -c copy "{output_file}"'
 
 
 def codec_to_string(codec: int) -> str:

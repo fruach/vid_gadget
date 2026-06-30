@@ -815,7 +815,7 @@ class VidGadgetApp:
         )
         rb_c.pack(anchor=tk.W)
 
-        self._create_tooltip(rb_norm, "오디오 음량을 -0.8dB로 Normalization 처리")
+        self._create_tooltip(rb_norm, "오디오 음량을 -0.6dB로 Normalization 처리")
         self._create_tooltip(rb_dt, "오디오 파일의 메타데이터, 가사, 챕터, 커버 이미지 제거")
         self._create_tooltip(rb_ev, "비디오 스트림만 추출 (오디오 제외)")
         self._create_tooltip(rb_ea, "오디오 스트림만 추출 (비디오 제외)")
@@ -1253,6 +1253,25 @@ class VidGadgetApp:
             messagebox.showinfo("알림", "파일을 추가하세요.")
             return
 
+        process_kind = self.process_kind_var.get()
+        files = self.file_listbox.get(0, tk.END)
+
+        if process_kind == PROC_KIND_MERGE:
+            invalid_file = next((f for f in files if not is_video_file(f)), None)
+            if invalid_file:
+                messagebox.showerror(
+                    "오류",
+                    f"합치기 작업은 동영상 파일만 사용할 수 있습니다.\n동영상이 아닌 파일: {invalid_file}",
+                )
+                return
+
+        if process_kind == PROC_KIND_MERGE_VA:
+            has_visual_file = any(is_video_file(f) or is_image_file(f) for f in files)
+            has_audio_file = any(is_audio_file(f) for f in files)
+            if not has_visual_file or not has_audio_file:
+                messagebox.showerror("오류", "영상/사진과 소리 파일이 1개씩 필요합니다.")
+                return
+
         # FFmpeg 확인
         if not self.check_ffmpeg():
             messagebox.showerror(
@@ -1261,7 +1280,7 @@ class VidGadgetApp:
             )
             return
 
-        if self.process_kind_var.get() == PROC_KIND_NORMALIZATION and not self.check_ffmpeg_normalize():
+        if process_kind == PROC_KIND_NORMALIZATION and not self.check_ffmpeg_normalize():
             messagebox.showerror(
                 "오류",
                 "ffmpeg-normalize 패키지가 없습니다.\n다음 명령으로 설치하세요:\npip install ffmpeg-normalize",
@@ -1464,15 +1483,7 @@ class VidGadgetApp:
                         self._run_cmd(cmd)
                     continue
 
-                # MERGE: 개별 .ts 변환에는 pause 없음 (마지막 concat 명령에서 pause)
-                add_pause = False
-                if process_kind == PROC_KIND_MERGE:
-                    add_pause = False
-                else:
-                    # add_pause = i == len(files) - 1
-                    pass
-
-                cmd = builder.build_command(filename, add_pause)
+                cmd = builder.build_command(filename)
 
                 # 실행
                 self._run_cmd(cmd)

@@ -176,6 +176,9 @@ def get_output_filename(input_file: str, output_codec: int, settings: dict = Non
     if process_kind == 8 and not name.endswith("-n"):  # PROC_KIND_NORMALIZATION
         name = f"{name}-n"
 
+    if process_kind == 1 and not name.endswith("_vid"):  # PROC_KIND_EXTRACT_VIDEO
+        name = f"{name}_vid"
+
     # 중복 파일 확인
     output_file = f"{name}.{new_ext}"
 
