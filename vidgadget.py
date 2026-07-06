@@ -48,6 +48,17 @@ PROC_KIND_EXTRACT_SUB = 6
 PROC_KIND_DELETE_TAGS = 7
 PROC_KIND_NORMALIZATION = 8
 
+PROCESS_KIND_LABELS = {
+    PROC_KIND_EXTRACT_VIDEO: "영상 추출",
+    PROC_KIND_EXTRACT_AUDIO: "오디오 추출",
+    PROC_KIND_CONVERT: "변환",
+    PROC_KIND_MERGE: "동영상 합치기",
+    PROC_KIND_MERGE_VA: "영상/사진+소리 합치기",
+    PROC_KIND_EXTRACT_SUB: "자막 추출",
+    PROC_KIND_DELETE_TAGS: "태그 삭제",
+    PROC_KIND_NORMALIZATION: "Normalization",
+}
+
 # 코덱 상수
 CODEC_UNKNOWN = 0
 CODEC_264 = 1  # AVC
@@ -128,6 +139,10 @@ class VidGadgetApp:
         self.current_process = None
         self.process_lock = threading.Lock()
         self.process_button_state_token = 0
+        self.status_text = "Build Date " + _BUILD_DATE_STR
+        self.status_blink_token = 0
+        self.status_color = "blue"
+        self.status_blink_ms = 120
         self.app_path = os.path.dirname(os.path.abspath(__file__))
         self.media_info_window_pos = None
         self.media_info_window = None
@@ -352,7 +367,7 @@ class VidGadgetApp:
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=(4, 0))
         ttk.Button(status_frame, text="?", width=2, command=self.show_about).pack(side=tk.LEFT)
-        self.status_label = ttk.Label(status_frame, text="Build Date " + _BUILD_DATE_STR)
+        self.status_label = ttk.Label(status_frame, text=self.status_text, foreground=self.status_color)
         self.status_label.pack(side=tk.LEFT, padx=10)
         link = ttk.Label(status_frame, text=" ", foreground="blue", cursor="hand2")
         link.pack(side=tk.RIGHT)
@@ -1247,6 +1262,43 @@ class VidGadgetApp:
         else:
             self.start_process()
 
+    def _format_status(self, process_kind: int, content: str, current=None, total=None) -> str:
+        """상태바 표시용 문구 생성"""
+        parts = [f"작업: {PROCESS_KIND_LABELS.get(process_kind, '알 수 없음')}", f"내용: {content}"]
+        if current is not None and total is not None:
+            parts.append(f"루프: {current}/{total}")
+        return " | ".join(parts)
+
+    def _format_file_status(self, process_kind: int, content: str, filename: str, current: int, total: int) -> str:
+        """파일 처리 상태바 표시용 문구 생성"""
+        return self._format_status(process_kind, f"{content}: {os.path.basename(filename)}", current, total)
+
+    def _get_status_hidden_color(self) -> str:
+        """상태바 깜빡임 때 잠깐 숨길 색상"""
+        try:
+            return self.root.cget("background")
+        except tk.TclError:
+            return "SystemButtonFace"
+
+    def _set_status(self, text: str, blink: bool = True, color=None):
+        """상태바 텍스트를 파란색으로 표시하고 변경 시 한 번 깜빡임"""
+        color = color or self.status_color
+        changed = text != self.status_text
+        self.status_text = text
+        self.status_blink_token += 1
+        token = self.status_blink_token
+
+        if blink and changed:
+            self.status_label.config(text=text, foreground=self._get_status_hidden_color())
+            self.root.after(self.status_blink_ms, lambda: self._show_status_after_blink(token, text, color))
+        else:
+            self.status_label.config(text=text, foreground=color)
+
+    def _show_status_after_blink(self, token: int, text: str, color: str):
+        """가장 최근 상태 변경에 대해서만 깜빡임 복원"""
+        if token == self.status_blink_token:
+            self.status_label.config(text=text, foreground=color)
+
     def start_process(self):
         """작업 시작"""
         if self.file_listbox.size() == 0:
@@ -1289,6 +1341,7 @@ class VidGadgetApp:
 
         # 쓰레드로 실행
         self.stop_process = False
+        self._set_status(self._format_status(process_kind, "작업 시작 중", 0, len(files)))
         self._set_process_button("작업 중지", "red")
         self.process_thread = threading.Thread(target=self.do_process, daemon=True)
         self.process_thread.start()
@@ -1296,7 +1349,7 @@ class VidGadgetApp:
     def stop_current_process(self):
         """현재 진행 중인 작업 강제 중지"""
         self.stop_process = True
-        self.status_label.config(text="중지 중...")
+        self._set_status(self._format_status(self.process_kind_var.get(), "중지 요청 중"))
 
         with self.process_lock:
             process = self.current_process
@@ -1304,10 +1357,10 @@ class VidGadgetApp:
         if process and process.poll() is None:
             process.kill()
 
-    def _finish_process(self, status_text: str):
+    def _finish_process(self, status_text: str, color=None):
         """작업 종료 후 UI 상태 복원"""
         self._set_process_button("작업 실행", self.process_button_default_fg)
-        self.status_label.config(text=status_text)
+        self._set_status(status_text, color=color)
 
     def _set_process_button(self, text: str, fg: str):
         """작업 버튼 텍스트 변경 후 일정시간 동안 클릭 방지"""
@@ -1358,18 +1411,20 @@ class VidGadgetApp:
             with self.process_lock:
                 self.current_process = process
 
-            process.wait()
+            returncode = process.wait()
 
             with self.process_lock:
                 if self.current_process == process:
                     self.current_process = None
 
             print(f"-------------------------------------\n명령 종료:\n {cmd}")
+            return returncode
 
         except Exception as e:
             print(f"Error: {e}")
             with self.process_lock:
                 self.current_process = None
+            return -1
 
     def _run_cmd_capture(self, cmd):
         """명령 실행 결과를 문자열로 반환"""
@@ -1409,13 +1464,21 @@ class VidGadgetApp:
 
     def do_process(self):
         """실제 처리 작업"""
-        status_text = "완료"
+        status_text = None
+        process_kind = self.process_kind_var.get()
+        total_files = self.file_listbox.size()
+        loop_total = total_files
+        current_loop = 0
+        completed_count = 0
+        skipped_count = 0
+        failed_count = 0
 
         try:
             settings = self.get_settings()
             files = settings["files"]
             process_kind = settings["process_kind"]
             total_files = len(files)
+            loop_total = 1 if process_kind == PROC_KIND_MERGE_VA else total_files
 
             # 합치기 (영상/사진 + 소리) - 단일 명령으로 처리
             if process_kind == PROC_KIND_MERGE_VA:
@@ -1426,28 +1489,41 @@ class VidGadgetApp:
 
                 builder = FFmpegCommandBuilder(settings, MEDIA_INFO())
                 cmd = builder.build_command(files[0])
-                self._run_cmd(cmd)
+                current_loop = 1
+                self.root.after(
+                    0,
+                    lambda: self._set_status(self._format_status(process_kind, "합치기 실행 중", current_loop, loop_total)),
+                )
+                if self._run_cmd(cmd) == 0:
+                    completed_count += 1
+                elif not self.stop_process:
+                    failed_count += 1
+                    status_text = "오류"
                 return
 
             for i, filename in enumerate(files):
                 if self.stop_process:
                     break
 
+                current_loop = i + 1
+
                 # 상태 업데이트
                 self.root.after(
                     0,
-                    lambda f=filename, current=i + 1, total=total_files: self.status_label.config(
-                        text=f"처리 중 ({current}/{total}): {f}"
+                    lambda f=filename, current=current_loop, total=loop_total: self._set_status(
+                        self._format_file_status(process_kind, "미디어 정보 읽는 중", f, current, total)
                     ),
                 )
 
                 # 미디어 정보
                 media_info = MediaInfo.get_info(filename, self.app_path)
                 if not media_info:
+                    skipped_count += 1
                     continue
 
                 # 태그 삭제는 지정된 음악 파일만 처리
                 if process_kind == PROC_KIND_DELETE_TAGS and not is_tag_delete_audio_file(filename):
+                    skipped_count += 1
                     continue
 
                 # 오디오 작업 시 오디오 트랙이 없으면 건너뛰기
@@ -1455,10 +1531,12 @@ class VidGadgetApp:
                     process_kind in (PROC_KIND_EXTRACT_AUDIO, PROC_KIND_DELETE_TAGS, PROC_KIND_NORMALIZATION)
                     and media_info.audio_count == 0
                 ):
+                    skipped_count += 1
                     continue
 
                 # 자막 추출 시 자막 트랙이 없으면 건너뛰기
                 if process_kind == PROC_KIND_EXTRACT_SUB and media_info.sub_count == 0:
+                    skipped_count += 1
                     continue
 
                 # 명령어 생성
@@ -1467,26 +1545,54 @@ class VidGadgetApp:
                 if process_kind == PROC_KIND_NORMALIZATION:
                     self.root.after(
                         0,
-                        lambda f=filename, current=i + 1, total=total_files: self.status_label.config(
-                            text=f"분석/정규화 중 ({current}/{total}): {f}"
+                        lambda f=filename, current=current_loop, total=loop_total: self._set_status(
+                            self._format_file_status(process_kind, "분석/정규화 중", f, current, total)
                         ),
                     )
                     self._run_normalization(filename, builder)
+                    if self.stop_process:
+                        break
+                    completed_count += 1
                     continue
 
                 # 자막 추출은 트랙별 개별 명령어
                 if process_kind == PROC_KIND_EXTRACT_SUB:
                     cmds = builder.build_command(filename)
+                    self.root.after(
+                        0,
+                        lambda f=filename, current=current_loop, total=loop_total: self._set_status(
+                            self._format_file_status(process_kind, "자막 추출 중", f, current, total)
+                        ),
+                    )
+                    command_failed = False
                     for cmd in cmds:
                         if self.stop_process:
                             break
-                        self._run_cmd(cmd)
+                        if self._run_cmd(cmd) != 0:
+                            command_failed = True
+                    if self.stop_process:
+                        break
+                    if command_failed:
+                        failed_count += 1
+                        status_text = "오류"
+                    else:
+                        completed_count += 1
                     continue
 
                 cmd = builder.build_command(filename)
 
                 # 실행
-                self._run_cmd(cmd)
+                self.root.after(
+                    0,
+                    lambda f=filename, current=current_loop, total=loop_total: self._set_status(
+                        self._format_file_status(process_kind, "실행 중", f, current, total)
+                    ),
+                )
+                if self._run_cmd(cmd) == 0:
+                    completed_count += 1
+                elif not self.stop_process:
+                    failed_count += 1
+                    status_text = "오류"
 
             # 합치기 (동영상+동영상) - .ts 변환 후 최종 합치기
             if not self.stop_process and process_kind == PROC_KIND_MERGE and len(files) >= 2:
@@ -1495,15 +1601,40 @@ class VidGadgetApp:
                 cmd = FFmpegCommandBuilder.build_merge_all_command(files, output_file)
 
                 if cmd:
-                    self._run_cmd(cmd)
+                    self.root.after(
+                        0,
+                        lambda: self._set_status(
+                            self._format_status(process_kind, "최종 합치기 실행 중", current_loop, loop_total)
+                        ),
+                    )
+                    if self._run_cmd(cmd) != 0 and not self.stop_process:
+                        failed_count += 1
+                        status_text = "오류"
 
         except Exception as e:
             status_text = "오류"
+            if not self.stop_process:
+                failed_count += 1
             print(f"Error: {e}")
         finally:
             if self.stop_process:
                 status_text = "중지됨"
-            self.root.after(0, lambda text=status_text: self._finish_process(text))
+            elif failed_count > 0:
+                status_text = "오류"
+            else:
+                status_text = "완료"
+
+            result_text = (
+                f"{status_text} - 완료 {completed_count}, 건너뜀 {skipped_count}, "
+                f"실패 {failed_count}, 전체 {total_files}"
+            )
+            result_color = "green" if status_text == "완료" else self.status_color
+            self.root.after(
+                0,
+                lambda text=self._format_status(
+                    process_kind, result_text, current_loop, loop_total
+                ), color=result_color: self._finish_process(text, color=color),
+            )
 
 
 def main():
