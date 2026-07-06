@@ -86,7 +86,7 @@ class FFmpegCommandBuilder:
         if process_kind == PROC_KIND_NORMALIZATION:
             return self._build_normalization_command(input_file)
 
-        # 합치기 (영상 + 소리)
+        # 합치기 (영상/사진 + 소리)
         if process_kind == PROC_KIND_MERGE_VA:
             return self._build_merge_va_command()
 
@@ -122,8 +122,8 @@ class FFmpegCommandBuilder:
             out_file = get_output_filename(image_file, CODEC_264)
             return (
                 f'ffmpeg -loop 1 -i "{image_file}" -i "{audio_file}" '
-                f'-c:v libx264 -tune stillimage -c:a aac -b:a 160k '
-                f'-pix_fmt yuv420p -shortest "{out_file}"'
+                f'-c:v libx264 -tune stillimage -vf "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p" '
+                f'-c:a aac -b:a 160k -shortest "{out_file}"'
             )
 
         out_file = get_output_filename(vid_file, self.settings.get("output_codec", CODEC_265))

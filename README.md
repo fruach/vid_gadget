@@ -82,9 +82,11 @@ scoop install python312
 scoop install ffmpeg
 ```
 
-### Python 패키지 설치
+### 설치
 
 ```bash
+git clone https://github.com/fruach/vid_gadget
+cd vid_gadget
 pip install -r requirements.txt
 ```
 
@@ -97,6 +99,11 @@ vidGadget.bat
 
 ```bash
 python vidgadget.py
+```
+
+## 업데이트
+```bash
+update.bat
 ```
 
 ## 사용법
