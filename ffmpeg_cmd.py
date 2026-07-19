@@ -253,7 +253,7 @@ class FFmpegCommandBuilder:
         video_disable = output_codec in AUDIO_OUTPUT_CODECS
         return audio_codec, bitrate, sample_rate, audio_channels, extra_options, video_disable
 
-    def build_normalization_command_args(self, input_file: str) -> list:
+    def build_normalization_command_args(self, input_file: str, pre_filter: Optional[str] = None) -> list:
         """ffmpeg-normalize 실행 인자"""
         true_peak, output_file = self._get_normalization_config(input_file)
         audio_codec, bitrate, sample_rate, audio_channels, extra_options, video_disable = (
@@ -288,6 +288,8 @@ class FFmpegCommandBuilder:
             args.extend(["-ac", str(audio_channels)])
         if extra_options:
             args.extend(["-e", json.dumps(extra_options)])
+        if pre_filter:
+            args.extend(["-prf", pre_filter])
 
         return args
 

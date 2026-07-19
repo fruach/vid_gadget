@@ -1269,7 +1269,9 @@ class VidGadgetApp:
             parts.append(f"루프: {current}/{total}")
         return " | ".join(parts)
 
-    def _format_file_status(self, process_kind: int, content: str, filename: str, current: int, total: int) -> str:
+    def _format_file_status(
+        self, process_kind: int, content: str, filename: str, current: int, total: int
+    ) -> str:
         """파일 처리 상태바 표시용 문구 생성"""
         return self._format_status(process_kind, f"{content}: {os.path.basename(filename)}", current, total)
 
@@ -1453,7 +1455,11 @@ class VidGadgetApp:
 
     def _run_normalization(self, filename, builder):
         """ffmpeg-normalize 패키지로 Normalization 처리"""
-        cmd = builder.build_normalization_command_args(filename)
+        pre_filter = self._get_normalization_silence_filter(filename)
+        if self.stop_process:
+            return
+
+        cmd = builder.build_normalization_command_args(filename, pre_filter)
         returncode, output = self._run_cmd_capture(cmd)
 
         if self.stop_process:
@@ -1461,6 +1467,14 @@ class VidGadgetApp:
         if returncode != 0:
             print(output)
             raise RuntimeError("ffmpeg-normalize 명령이 실패했습니다.")
+
+    def _get_normalization_silence_filter(self, filename):
+        """오디오 파일 양 끝의 완전한 무음을 각각 500ms로 맞춤"""
+        if not is_audio_file(filename):
+            return None
+
+        trim_silence = "silenceremove=start_periods=1:start_threshold=0:window=0"
+        return f"{trim_silence},areverse,{trim_silence},areverse," "adelay=500:all=1,apad=pad_dur=0.5"
 
     def do_process(self):
         """실제 처리 작업"""
@@ -1492,7 +1506,9 @@ class VidGadgetApp:
                 current_loop = 1
                 self.root.after(
                     0,
-                    lambda: self._set_status(self._format_status(process_kind, "합치기 실행 중", current_loop, loop_total)),
+                    lambda: self._set_status(
+                        self._format_status(process_kind, "합치기 실행 중", current_loop, loop_total)
+                    ),
                 )
                 if self._run_cmd(cmd) == 0:
                     completed_count += 1
