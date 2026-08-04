@@ -1,7 +1,7 @@
 r"""
 음성 인식(STT, Speech-to-Text) 기능 구현
     - WhisperX 또는 CrisperWhisper로 음성인식 하므로 별도의 API는 필요없다
-    - 자막변환 기능 : SRT, VTT, SBV, LRC
+    - 자막변환 기능 : SRT, VTT, SBV, LRC, TXT
 
 python -m pip install google-cloud-speech openai python-dotenv
 
@@ -417,7 +417,7 @@ def parse_lrc_cues(lines, extension_seconds):
 
 
 def convert_subtitle_file(input_path, output_format, position=None, extension_seconds=3.0):
-    """SRT, VTT, SBV 또는 LRC 자막 파일을 지정한 형식으로 변환해 저장한다."""
+    """자막 파일을 SRT, VTT, SBV, LRC 또는 TXT 형식으로 변환해 저장한다."""
     lines = input_path.read_text(encoding="utf-8-sig").splitlines()
     header_lines = []
     if input_path.suffix.lower() == ".vtt" and lines and lines[0].strip().startswith("WEBVTT"):
@@ -452,6 +452,9 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
 
     converted_cues = []
     for cue_number, (start, end, settings, text) in enumerate(cues, start=1):
+        if output_format == "txt":
+            converted_cues.append(" ".join(text.splitlines()))
+            continue
         if output_format == "lrc":
             converted_cues.append(
                 f"{format_lrc_timestamp(subtitle_timestamp_to_seconds(start))}{' '.join(text.splitlines())}"
@@ -478,7 +481,7 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
         if header_lines:
             prefix += "\n".join(header_lines) + "\n"
         prefix += "\n"
-    separator = "\n" if output_format == "lrc" else "\n\n"
+    separator = "\n" if output_format in ("lrc", "txt") else "\n\n"
     converted_subtitles = prefix + separator.join(converted_cues) + "\n"
     output_path = input_path.with_suffix(f".{output_format}")
     number = 1
@@ -679,6 +682,8 @@ def add_lyrics_timestamps(
             )
             + "\n"
         )
+    if output_format == "txt":
+        return "\n".join(line_texts[line_index] for line_index in timed_line_indexes) + "\n"
 
     cues = []
     for position, line_index in enumerate(timed_line_indexes):
@@ -712,7 +717,7 @@ def add_lyrics_timestamps(
 
 
 def format_whisper_subtitles(whisper_result, output_format, position_setting=None, extension_seconds=3.0):
-    """WhisperX 단어 시각을 휴지 구간과 문장부호로 나눠 SRT, VTT, SBV 또는 LRC로 만든다."""
+    """WhisperX 단어 시각을 휴지 구간과 문장부호로 나눠 지정한 출력 형식으로 만든다."""
     words = []
     for word_data in whisper_result.get("word_segments", []):
         text = str(word_data.get("word", "")).strip()
@@ -757,6 +762,8 @@ def format_whisper_subtitles(whisper_result, output_format, position_setting=Non
             )
             + "\n"
         )
+    if output_format == "txt":
+        return "\n".join(" ".join(text.splitlines()) for _start, _end, text in segments) + "\n"
 
     cues = []
     for index, (start, end, text) in enumerate(segments):
@@ -787,7 +794,7 @@ def create_auto_subtitles(
     model_name="whisper",
     audio_path=None,
 ):
-    """로컬 모델의 자동 인식 결과로 SRT, VTT, SBV 또는 LRC 자막을 저장한다."""
+    """로컬 모델의 자동 인식 결과를 지정한 형식으로 저장한다."""
     whisper_result = get_model_result(audio_path or input_path, model_name, language, word_timestamps=True)
     subtitles = format_whisper_subtitles(whisper_result, output_format, position, extension_seconds)
     output_path = input_path.with_suffix(f".{output_format}")
@@ -1139,7 +1146,9 @@ def parse_args(argv=None):
         help=("오디오 언어 코드 (가사/Whisper는 생략 시 자동 감지, " "API는 ko, CrisperWhisper는 en)"),
     )
     parser.add_argument(
-        "--format", choices=("srt", "vtt", "sbv", "lrc"), help="자막 출력 형식 (--lyrics 생략 시 자동 인식)"
+        "--format",
+        choices=("srt", "vtt", "sbv", "lrc", "txt"),
+        help="자막 출력 형식 (기본값: srt, --lyrics 생략 시 자동 인식)",
     )
     parser.add_argument(
         "--position", help="VTT 자막 위치 설정 (예: 4 또는 line:-4 position:50%% align:center)"
@@ -1156,6 +1165,8 @@ def parse_args(argv=None):
         parser.print_help()
         return None
     args = parser.parse_args(argv)
+    if args.format is None and args.api is None:
+        args.format = "srt"
     if not (args.api or args.lyrics or args.model or args.format or args.gen_vocal):
         parser.error("--api, --model, --lyrics, --format 또는 --gen-vocal 중 하나가 필요합니다.")
     if args.api and args.format:
@@ -1204,7 +1215,7 @@ def main(argv=None):
 
     if is_subtitle_input:
         if args.format is None:
-            raise SttError("자막 파일을 변환하려면 --format srt, vtt, sbv 또는 lrc가 필요합니다.")
+            raise SttError("자막 파일을 변환하려면 --format srt, vtt, sbv, lrc 또는 txt가 필요합니다.")
         output_path, result = convert_subtitle_file(args.input_file, args.format, args.position, args.extend)
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
