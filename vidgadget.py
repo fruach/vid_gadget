@@ -1,6 +1,9 @@
 """
 VidGadget - Video/Audio Conversion Tool using FFmpeg
 Python port of the C++ VidGadget application
+
+pip install tkinterdnd2 pymediainfo ffmpeg-normalize
+
 """
 
 import tkinter as tk
@@ -207,6 +210,7 @@ class VidGadgetApp:
             # r"D:\_Python\app\vidGadget\bak\down-c.flac",
             # r"D:\_Python\app\vidGadget\bak\timeF.flac",
             # r"D:\_Python\app\vidGadget\bak\timeM.flac",
+            r"D:\ham.mkv",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):

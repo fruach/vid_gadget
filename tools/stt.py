@@ -1,7 +1,11 @@
 r"""
 음성 인식(STT, Speech-to-Text) 기능 구현
     - WhisperX로 음성인식 하므로 별도의 API는 필요없다
-    - 자막변환 기능 : SRT, VTT, LRC
+    - 자막변환 기능 : SRT, VTT, SBV, LRC
+
+python -m pip install google-cloud-speech openai python-dotenv
+C:\Python\venv\whisperx\Scripts\python.exe -m pip install whisperx audio-separator
+
 """
 
 import argparse
@@ -33,6 +37,10 @@ AUDIO_SEPARATOR_MODEL_DIR = AUDIO_SEPARATOR_EXECUTABLE.parents[1] / "audio-separ
 SUBTITLE_TIMESTAMP_PATTERN = re.compile(
     r"^(?P<start>(?:[0-9]+:)?[0-9]{2}:[0-9]{2}[,.][0-9]{3})\s+-->\s+"
     r"(?P<end>(?:[0-9]+:)?[0-9]{2}:[0-9]{2}[,.][0-9]{3})(?:\s+(?P<settings>.*))?$"
+)
+SBV_TIMESTAMP_PATTERN = re.compile(
+    r"^(?P<start>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})\s*,\s*"
+    r"(?P<end>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})$"
 )
 LRC_TIMESTAMP_PATTERN = re.compile(
     r"\[(?P<minutes>[0-9]+):(?P<seconds>[0-5][0-9])(?:[.:](?P<fraction>[0-9]{1,3}))?\]"
@@ -183,13 +191,14 @@ def build_lyrics_prompt(lyrics):
 
 
 def format_subtitle_timestamp(seconds, output_format):
-    """초 단위 시각을 SRT 또는 VTT 타임스탬프로 변환한다."""
+    """초 단위 시각을 SRT, VTT 또는 SBV 타임스탬프로 변환한다."""
     milliseconds = max(0, round(seconds * 1000))
     hours, remainder = divmod(milliseconds, 3_600_000)
     minutes, remainder = divmod(remainder, 60_000)
     whole_seconds, fraction = divmod(remainder, 1000)
     separator = "," if output_format == "srt" else "."
-    return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d}{separator}{fraction:03d}"
+    formatted_hours = str(hours) if output_format == "sbv" else f"{hours:02d}"
+    return f"{formatted_hours}:{minutes:02d}:{whole_seconds:02d}{separator}{fraction:03d}"
 
 
 def format_lrc_timestamp(seconds):
@@ -201,15 +210,18 @@ def format_lrc_timestamp(seconds):
 
 
 def convert_subtitle_timestamp(timestamp, output_format):
-    """SRT/VTT 타임스탬프를 출력 형식에 맞게 변환한다."""
+    """SRT/VTT/SBV 타임스탬프를 출력 형식에 맞게 변환한다."""
     if timestamp.count(":") == 1:
         timestamp = f"00:{timestamp}"
     separator = "," if output_format == "srt" else "."
-    return f"{timestamp[:-4]}{separator}{timestamp[-3:]}"
+    converted = f"{timestamp[:-4]}{separator}{timestamp[-3:]}"
+    hours, remainder = converted.split(":", 1)
+    formatted_hours = str(int(hours)) if output_format == "sbv" else f"{int(hours):02d}"
+    return f"{formatted_hours}:{remainder}"
 
 
 def subtitle_timestamp_to_seconds(timestamp):
-    """SRT/VTT 타임스탬프를 초 단위 값으로 변환한다."""
+    """SRT/VTT/SBV 타임스탬프를 초 단위 값으로 변환한다."""
     time_part, milliseconds = timestamp.replace(",", ".").rsplit(".", 1)
     time_values = [int(value) for value in time_part.split(":")]
     if len(time_values) == 2:
@@ -221,7 +233,7 @@ def subtitle_timestamp_to_seconds(timestamp):
 
 
 def parse_lrc_cues(lines, extension_seconds):
-    """LRC 줄을 SRT/VTT 변환에 사용할 자막 큐로 변환한다."""
+    """LRC 줄을 SRT/VTT/SBV 변환에 사용할 자막 큐로 변환한다."""
     timed_lines = []
     for line in lines:
         matches = list(LRC_TIMESTAMP_PATTERN.finditer(line))
@@ -251,7 +263,7 @@ def parse_lrc_cues(lines, extension_seconds):
 
 
 def convert_subtitle_file(input_path, output_format, position=None, extension_seconds=3.0):
-    """SRT, VTT 또는 LRC 자막 파일을 지정한 형식으로 변환해 저장한다."""
+    """SRT, VTT, SBV 또는 LRC 자막 파일을 지정한 형식으로 변환해 저장한다."""
     lines = input_path.read_text(encoding="utf-8-sig").splitlines()
     header_lines = []
     if input_path.suffix.lower() == ".vtt" and lines and lines[0].strip().startswith("WEBVTT"):
@@ -264,9 +276,12 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
         cues = parse_lrc_cues(lines, extension_seconds)
     else:
         cues = []
+        timestamp_pattern = (
+            SBV_TIMESTAMP_PATTERN if input_path.suffix.lower() == ".sbv" else SUBTITLE_TIMESTAMP_PATTERN
+        )
         line_index = 0
         while line_index < len(lines):
-            match = SUBTITLE_TIMESTAMP_PATTERN.fullmatch(lines[line_index].strip())
+            match = timestamp_pattern.fullmatch(lines[line_index].strip())
             if match is None:
                 line_index += 1
                 continue
@@ -275,7 +290,8 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
             while line_index < len(lines) and lines[line_index].strip():
                 text_lines.append(lines[line_index])
                 line_index += 1
-            cues.append((match["start"], match["end"], match["settings"], "\n".join(text_lines)))
+            settings = match.groupdict().get("settings")
+            cues.append((match["start"], match["end"], settings, "\n".join(text_lines)))
 
     if not cues:
         raise SttError(f"자막 큐를 찾을 수 없습니다: {input_path}")
@@ -287,8 +303,9 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
                 f"{format_lrc_timestamp(subtitle_timestamp_to_seconds(start))}{' '.join(text.splitlines())}"
             )
             continue
+        timestamp_separator = "," if output_format == "sbv" else " --> "
         timestamp = (
-            f"{convert_subtitle_timestamp(start, output_format)} --> "
+            f"{convert_subtitle_timestamp(start, output_format)}{timestamp_separator}"
             f"{convert_subtitle_timestamp(end, output_format)}"
         )
         if output_format == "vtt":
@@ -296,8 +313,10 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
             if cue_settings:
                 timestamp = f"{timestamp} {cue_settings}"
             converted_cues.append(f"{timestamp}\n{text}")
-        else:
+        elif output_format == "srt":
             converted_cues.append(f"{cue_number}\n{timestamp}\n{text}")
+        else:
+            converted_cues.append(f"{timestamp}\n{text}")
 
     prefix = ""
     if output_format == "vtt":
@@ -516,8 +535,9 @@ def add_lyrics_timestamps(
             end = max(transcript_end, start + 0.5)
         if position + 1 < len(vocal_line_indexes):
             end = min(end, line_starts[vocal_line_indexes[position + 1]])
+        timestamp_separator = "," if output_format == "sbv" else " --> "
         timestamp = (
-            f"{format_subtitle_timestamp(start, output_format)} --> "
+            f"{format_subtitle_timestamp(start, output_format)}{timestamp_separator}"
             f"{format_subtitle_timestamp(end, output_format)}"
         )
         if output_format == "vtt" and position_setting:
@@ -532,7 +552,7 @@ def add_lyrics_timestamps(
 
 
 def format_whisper_subtitles(whisper_result, output_format, position_setting=None, extension_seconds=3.0):
-    """WhisperX 단어 시각을 휴지 구간과 문장부호로 나눠 SRT, VTT 또는 LRC로 만든다."""
+    """WhisperX 단어 시각을 휴지 구간과 문장부호로 나눠 SRT, VTT, SBV 또는 LRC로 만든다."""
     words = []
     for word_data in whisper_result.get("word_segments", []):
         text = str(word_data.get("word", "")).strip()
@@ -582,8 +602,9 @@ def format_whisper_subtitles(whisper_result, output_format, position_setting=Non
     for index, (start, end, text) in enumerate(segments):
         if index + 1 < len(segments):
             end = min(end, segments[index + 1][0])
+        timestamp_separator = "," if output_format == "sbv" else " --> "
         timestamp = (
-            f"{format_subtitle_timestamp(start, output_format)} --> "
+            f"{format_subtitle_timestamp(start, output_format)}{timestamp_separator}"
             f"{format_subtitle_timestamp(end, output_format)}"
         )
         if output_format == "vtt" and position_setting:
@@ -598,7 +619,7 @@ def format_whisper_subtitles(whisper_result, output_format, position_setting=Non
 
 
 def create_auto_subtitles(input_path, output_format, language=None, position=None, extension_seconds=3.0):
-    """WhisperX 자동 인식 결과로 SRT, VTT 또는 LRC 자막 파일을 저장한다."""
+    """WhisperX 자동 인식 결과로 SRT, VTT, SBV 또는 LRC 자막 파일을 저장한다."""
     whisper_result = get_whisper_result(input_path, language)
     subtitles = format_whisper_subtitles(whisper_result, output_format, position, extension_seconds)
     output_path = input_path.with_suffix(f".{output_format}")
@@ -745,14 +766,15 @@ def parse_args(argv=None):
         epilog='''명령 예제:
   python stt.py input.mp3 --api google --lang ko
   python stt.py input.mp3 --api openai --lang en
-  python stt.py sky.srt --format vtt --position 4
+  python stt.py song.srt --format vtt --position 4
   python stt.py song.vtt --format lrc
   python stt.py song.lrc --format srt
+  python stt.py song.sbv --format srt
   python stt.py input.mp3 --format lrc
   python stt.py input.mp3 --format vtt --position "line:-4 position:50% align:center" --extend 5
   python stt.py input.flac --lyrics input.txt
-  python stt.py input.flac --lyrics call-lyrics.txt --format srt
-  python stt.py input.flac --lyrics call-lyrics.txt --format vtt --lang en
+  python stt.py input.flac --lyrics song.txt --format srt
+  python stt.py input.flac --lyrics song.txt --format vtt --lang en
   python stt.py input.flac --lyrics input.txt --format vtt --position "line:-4 position:50% align:center"''',
     )
     parser.add_argument("input_file", metavar="입력파일", type=Path, help="오디오, 동영상 또는 자막 파일")
@@ -763,7 +785,7 @@ def parse_args(argv=None):
         "--lang", help="오디오 언어 코드 (가사 모드는 생략 시 자동 감지, API 모드는 기본값 ko)"
     )
     parser.add_argument(
-        "--format", choices=("srt", "vtt", "lrc"), help="자막 출력 형식 (--lyrics 생략 시 자동 인식)"
+        "--format", choices=("srt", "vtt", "sbv", "lrc"), help="자막 출력 형식 (--lyrics 생략 시 자동 인식)"
     )
     parser.add_argument(
         "--position", help="VTT 자막 위치 설정 (예: 4 또는 line:-4 position:50%% align:center)"
@@ -794,7 +816,7 @@ def main(argv=None):
 
     start_time = datetime.now()
     start_counter = time.perf_counter()
-    is_subtitle_input = args.input_file.suffix.lower() in (".srt", ".vtt", ".lrc")
+    is_subtitle_input = args.input_file.suffix.lower() in (".srt", ".vtt", ".sbv", ".lrc")
     if is_subtitle_input:
         print(f"작업 시작: {args.input_file} 자막을 {args.format or '미지정'} 형식으로 변환", flush=True)
     elif args.lyrics:
@@ -809,7 +831,7 @@ def main(argv=None):
 
     if is_subtitle_input:
         if args.format is None:
-            raise SttError("자막 파일을 변환하려면 --format srt, vtt 또는 lrc가 필요합니다.")
+            raise SttError("자막 파일을 변환하려면 --format srt, vtt, sbv 또는 lrc가 필요합니다.")
         output_path, result = convert_subtitle_file(args.input_file, args.format, args.position, args.extend)
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter

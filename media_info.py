@@ -9,7 +9,6 @@ import re
 import json
 from dataclasses import dataclass, field
 from typing import List, Optional
-import math
 
 # 코덱 상수
 CODEC_UNKNOWN = 0
@@ -115,6 +114,8 @@ class SubInfo:
 class AudioInfo:
     """오디오 트랙 정보"""
 
+    title: str = ""
+    codec_id: str = ""
     size: int = 0
     duration: int = 0
     codec: int = 0
@@ -155,6 +156,38 @@ class AudioInfo:
             LANG_GERMAN: "DE",
         }
         return lang_names.get(self.lang, "")
+
+    @property
+    def extension(self) -> str:
+        """원본 오디오 스트림을 저장할 소문자 확장자 반환"""
+        codec_extensions = {
+            "mp3": "mp3",
+            "aac": "aac",
+            "vorbis": "ogg",
+            "opus": "opus",
+            "flac": "flac",
+            "ac3": "ac3",
+            "eac3": "eac3",
+            "dts": "dts",
+        }
+        codec_id = self.codec_id.lower()
+        if codec_id.startswith("pcm_"):
+            return "wav"
+        if codec_id in codec_extensions:
+            return codec_extensions[codec_id]
+
+        fallback_extensions = {
+            A_CODEC_MP3: "mp3",
+            A_CODEC_AAC: "aac",
+            A_CODEC_OGG: "ogg",
+            A_CODEC_DTS: "dts",
+            A_CODEC_WAV: "wav",
+            A_CODEC_AC3: "ac3",
+            A_CODEC_OPUS: "opus",
+            A_CODEC_FLAC: "flac",
+            A_CODEC_MKA: "mka",
+        }
+        return fallback_extensions.get(self.codec, "mka")
 
 
 @dataclass
@@ -493,20 +526,33 @@ class MediaInfo:
         if name_lower == "format":
             if "DTS" in value_upper:
                 audio.codec = A_CODEC_DTS
+                audio.codec_id = "dts"
+            elif "E-AC-3" in value_upper or "EAC3" in value_upper:
+                audio.codec = A_CODEC_AC3
+                audio.codec_id = "eac3"
             elif "AC-3" in value_upper:
                 audio.codec = A_CODEC_AC3
+                audio.codec_id = "ac3"
             elif "AAC" in value_upper:
                 audio.codec = A_CODEC_AAC
+                audio.codec_id = "aac"
             elif "OPUS" in value_upper:
                 audio.codec = A_CODEC_OPUS
+                audio.codec_id = "opus"
             elif "MPEG AUDIO" in value_upper:
                 audio.codec = A_CODEC_MP3
+                audio.codec_id = "mp3"
             elif "OGG" in value_upper or "VORBIS" in value_upper:
                 audio.codec = A_CODEC_OGG
+                audio.codec_id = "vorbis"
             elif "FLAC" in value_upper:
                 audio.codec = A_CODEC_FLAC
+                audio.codec_id = "flac"
             elif "PCM" in value_upper or "WAVE" in value_upper:
                 audio.codec = A_CODEC_WAV
+                audio.codec_id = "pcm"
+        elif name_lower == "title":
+            audio.title = value
         elif name_lower == "language":
             if "KOREAN" in value_upper:
                 audio.lang = LANG_KOREAN
@@ -694,18 +740,30 @@ class MediaInfo:
                     codec = (track.format or "").upper()
                     if "AAC" in codec:
                         audio.codec = A_CODEC_AAC
+                        audio.codec_id = "aac"
                     elif "MP3" in codec or "MPEG" in codec:
                         audio.codec = A_CODEC_MP3
+                        audio.codec_id = "mp3"
+                    elif "E-AC-3" in codec or "EAC3" in codec:
+                        audio.codec = A_CODEC_AC3
+                        audio.codec_id = "eac3"
                     elif "AC3" in codec or "AC-3" in codec:
                         audio.codec = A_CODEC_AC3
+                        audio.codec_id = "ac3"
                     elif "DTS" in codec:
                         audio.codec = A_CODEC_DTS
+                        audio.codec_id = "dts"
                     elif "VORBIS" in codec or "OGG" in codec:
                         audio.codec = A_CODEC_OGG
+                        audio.codec_id = "vorbis"
                     elif "OPUS" in codec:
                         audio.codec = A_CODEC_OPUS
+                        audio.codec_id = "opus"
                     elif "FLAC" in codec:
                         audio.codec = A_CODEC_FLAC
+                        audio.codec_id = "flac"
+
+                    audio.title = getattr(track, "title", "") or ""
 
                     # 언어
                     lang = (track.language or "").upper()
@@ -861,6 +919,8 @@ class MediaInfo:
 
             elif codec_type == "audio":
                 audio = AudioInfo()
+                audio.codec_id = codec_name
+                audio.title = stream.get("tags", {}).get("title", "")
                 if stream.get("duration"):
                     audio.duration = int(float(stream["duration"]))
                 elif stream.get("tags", {}).get("DURATION"):

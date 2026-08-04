@@ -74,6 +74,14 @@ class FFmpegCommandBuilder:
         """FFmpeg 명령어 생성"""
         process_kind = self.settings.get("process_kind", PROC_KIND_CONVERT)
 
+        # 영상 추출
+        if process_kind == PROC_KIND_EXTRACT_VIDEO:
+            return self._build_extract_video_command(input_file)
+
+        # 오디오 추출
+        if process_kind == PROC_KIND_EXTRACT_AUDIO:
+            return self._build_extract_audio_command(input_file)
+
         # 자막 추출
         if process_kind == PROC_KIND_EXTRACT_SUB:
             return self._build_extract_sub_command(input_file)
@@ -96,6 +104,72 @@ class FFmpegCommandBuilder:
 
         # 일반 변환/추출
         return self._build_convert_command(input_file)
+
+    def _build_extract_video_command(self, input_file: str) -> str:
+        """첫 번째 영상 스트림을 원본 코덱 그대로 추출"""
+        name, input_ext = divide_name(input_file)
+        extension_by_codec = {
+            CODEC_AVC: "mp4",
+            CODEC_HEVC: "mp4",
+            CODEC_AV1: "av1",
+            CODEC_VP8: "ivf",
+            CODEC_VP9: "ivf",
+            CODEC_GIF: "gif",
+            CODEC_WEBP: "webp",
+        }
+        extension = extension_by_codec.get(self.media_info.codec, input_ext.lower())
+        output_file = self._get_available_output_file(f"{name}_vid.{extension}")
+        range_cmd = self._get_range_command()
+
+        cmd = (
+            f'ffmpeg -y {range_cmd["start1"]} -i "{input_file}" '
+            f'{range_cmd["start2"]} {range_cmd["end"]} '
+            f'-map 0:v:0 -an -sn -dn -c:v copy "{output_file}"'
+        )
+        return re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
+
+    def _build_extract_audio_command(self, input_file: str) -> str:
+        """모든 오디오 트랙을 메타데이터가 포함된 개별 파일로 추출"""
+        name, _ = divide_name(input_file)
+        range_cmd = self._get_range_command()
+        outputs = []
+
+        for i, track in enumerate(self.media_info.audio_tracks):
+            filename_parts = [name, f"audio{i + 1:02d}"]
+            if track.title:
+                title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", track.title).strip(" .")
+                if title:
+                    filename_parts.append(title)
+            if track.bitrate:
+                filename_parts.append(f"{track.bitrate}kbps")
+            if track.channel:
+                filename_parts.append(f"{track.channel}ch")
+            if track.lang_name:
+                filename_parts.append(track.lang_name.lower())
+
+            output_file = self._get_available_output_file(
+                f"{'.'.join(filename_parts)}.{track.extension.lower()}"
+            )
+            outputs.append(
+                f'{range_cmd["start2"]} {range_cmd["end"]} '
+                f'-map 0:a:{i} -vn -c:a copy "{output_file}"'
+            )
+
+        cmd = f'ffmpeg -y {range_cmd["start1"]} -i "{input_file}" {" ".join(outputs)}'
+        return re.sub(r'"[^"]*"|\s{2,}', lambda m: m.group() if m.group().startswith('"') else " ", cmd)
+
+    @staticmethod
+    def _get_available_output_file(output_file: str) -> str:
+        """기존 파일과 겹치지 않는 출력 파일명 반환"""
+        if not os.path.exists(output_file):
+            return output_file
+
+        name, ext = os.path.splitext(output_file)
+        for i in range(2, 100):
+            candidate = f"{name}_({i:02d}){ext}"
+            if not os.path.exists(candidate):
+                return candidate
+        return output_file
 
     def _build_merge_va_command(self) -> str:
         """영상/사진 + 소리 합치기 명령어"""
