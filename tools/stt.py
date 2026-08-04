@@ -1,10 +1,13 @@
 r"""
 음성 인식(STT, Speech-to-Text) 기능 구현
-    - WhisperX로 음성인식 하므로 별도의 API는 필요없다
+    - WhisperX 또는 CrisperWhisper로 음성인식 하므로 별도의 API는 필요없다
     - 자막변환 기능 : SRT, VTT, SBV, LRC
 
 python -m pip install google-cloud-speech openai python-dotenv
-C:\Python\venv\whisperx\Scripts\python.exe -m pip install whisperx audio-separator
+
+C:\Python\venv\whisperx\Scripts\python.exe -m pip install whisperx audio-separator "crisperwhisper[transformers]"
+
+crisperwhisper 모델 다운로드를 위해서 hf login 필요: C:\Python\venv\whisperx\Scripts\hf.exe auth login
 
 """
 
@@ -31,6 +34,7 @@ PRICE_PER_MINUTE_USD = {"google": 0.016, "openai": 0.006}
 USD_TO_KRW = 1500
 GOOGLE_REGION = "us"
 WHISPERX_EXECUTABLE = Path(r"C:\Python\venv\whisperx\Scripts\whisperx.exe")
+CRISPERWHISPER_PYTHON_EXECUTABLE = Path(r"C:\Python\venv\whisperx\Scripts\python.exe")
 AUDIO_SEPARATOR_EXECUTABLE = Path(r"C:\Python\venv\whisperx\Scripts\audio-separator.exe")
 AUDIO_SEPARATOR_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 AUDIO_SEPARATOR_MODEL_DIR = AUDIO_SEPARATOR_EXECUTABLE.parents[1] / "audio-separator-models"
@@ -39,17 +43,76 @@ SUBTITLE_TIMESTAMP_PATTERN = re.compile(
     r"(?P<end>(?:[0-9]+:)?[0-9]{2}:[0-9]{2}[,.][0-9]{3})(?:\s+(?P<settings>.*))?$"
 )
 SBV_TIMESTAMP_PATTERN = re.compile(
-    r"^(?P<start>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})\s*,\s*"
-    r"(?P<end>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})$"
+    r"^(?P<start>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})\s*,\s*" r"(?P<end>[0-9]+:[0-9]{2}:[0-9]{2}\.[0-9]{3})$"
 )
 LRC_TIMESTAMP_PATTERN = re.compile(
     r"\[(?P<minutes>[0-9]+):(?P<seconds>[0-5][0-9])(?:[.:](?P<fraction>[0-9]{1,3}))?\]"
 )
+MODEL_ALIASES = {
+    "whisper": "whisper",
+    "w": "whisper",
+    "crisperwhisper": "crisperwhisper",
+    "cw": "crisperwhisper",
+}
+CRISPERWHISPER_RUNNER = r"""
+import json
+import sys
+from pathlib import Path
+
+from crisperwhisper import CrisperWhisperModel
+
+model = CrisperWhisperModel(
+    "large",
+    backend="transformers",
+    device="cuda",
+    compute_type="float16",
+)
+result = model.transcribe(
+    sys.argv[1],
+    language=sys.argv[2],
+    word_timestamps=sys.argv[4] == "1",
+)
+if not result.text.strip():
+    print(
+        "CrisperWhisper 빈 결과: 첫 토큰 EOT 억제 후 intended 모드로 재시도합니다.",
+        file=sys.stderr,
+        flush=True,
+    )
+    engine = model._engine
+    engine.model.generation_config.begin_suppress_tokens = [engine.eot_id]
+    engine.model.config.begin_suppress_tokens = [engine.eot_id]
+    result = model.transcribe(
+        sys.argv[1],
+        language=sys.argv[2],
+        mode="intended",
+        word_timestamps=sys.argv[4] == "1",
+    )
+payload = {
+    "text": result.text,
+    "word_segments": [
+        {"word": word.word, "start": word.start, "end": word.end}
+        for word in result.words or []
+        if word.start is not None and word.end is not None
+    ],
+}
+Path(sys.argv[3]).write_text(
+    json.dumps(payload, ensure_ascii=False),
+    encoding="utf-8",
+)
+"""
 
 
 def decode_subprocess_output(output):
     """외부 프로그램의 바이트 출력을 UTF-8 문자열로 안전하게 변환한다."""
     return output.decode("utf-8", errors="replace").strip()
+
+
+def normalize_model_name(value):
+    """모델 이름 또는 약자를 정식 모델 이름으로 변환한다."""
+    try:
+        return MODEL_ALIASES[value.lower()]
+    except KeyError as error:
+        raise argparse.ArgumentTypeError("모델은 whisper(w) 또는 crisperwhisper(cw)여야 합니다.") from error
 
 
 def convert_to_audio_chunks(input_path, output_dir):
@@ -91,6 +154,35 @@ def convert_to_audio_chunks(input_path, output_dir):
     if not chunks:
         raise SttError("입력 파일에서 오디오 트랙을 찾을 수 없습니다.")
     return chunks
+
+
+def convert_to_audio_file(input_path, output_path):
+    """입력 미디어의 첫 오디오 트랙을 16 kHz 모노 WAV로 변환한다."""
+    if shutil.which("ffmpeg") is None:
+        raise SttError("ffmpeg를 찾을 수 없습니다. ffmpeg를 설치하고 PATH에 추가하세요.")
+
+    command = [
+        "ffmpeg",
+        "-v",
+        "error",
+        "-i",
+        str(input_path),
+        "-map",
+        "0:a:0",
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "pcm_s16le",
+        str(output_path),
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        detail = decode_subprocess_output(result.stderr) or "오디오 변환에 실패했습니다."
+        raise SttError(f"ffmpeg 오류: {detail}")
+    return output_path
 
 
 def get_audio_durations(audio_paths):
@@ -587,7 +679,7 @@ def format_whisper_subtitles(whisper_result, output_format, position_setting=Non
             segments.append((start, end, text))
 
     if not segments:
-        raise SttError("WhisperX 결과에서 자막 세그먼트를 찾을 수 없습니다.")
+        raise SttError("음성 인식 결과에서 자막 세그먼트를 찾을 수 없습니다.")
 
     if output_format == "lrc":
         return (
@@ -618,9 +710,16 @@ def format_whisper_subtitles(whisper_result, output_format, position_setting=Non
     return prefix + "\n\n".join(cues) + "\n"
 
 
-def create_auto_subtitles(input_path, output_format, language=None, position=None, extension_seconds=3.0):
-    """WhisperX 자동 인식 결과로 SRT, VTT, SBV 또는 LRC 자막 파일을 저장한다."""
-    whisper_result = get_whisper_result(input_path, language)
+def create_auto_subtitles(
+    input_path,
+    output_format,
+    language=None,
+    position=None,
+    extension_seconds=3.0,
+    model_name="whisper",
+):
+    """로컬 모델의 자동 인식 결과로 SRT, VTT, SBV 또는 LRC 자막을 저장한다."""
+    whisper_result = get_model_result(input_path, model_name, language, word_timestamps=True)
     subtitles = format_whisper_subtitles(whisper_result, output_format, position, extension_seconds)
     output_path = input_path.with_suffix(f".{output_format}")
     number = 1
@@ -758,6 +857,66 @@ def transcribe_openai(audio_paths, language):
     return "\n".join(transcripts)
 
 
+def transcribe_model(input_path, model_name, language=None):
+    """로컬 WhisperX 또는 CrisperWhisper 모델로 입력 파일을 전사한다."""
+    if model_name == "whisper":
+        whisper_result = get_whisper_result(input_path, language)
+        transcript = str(whisper_result.get("text", "")).strip()
+        if not transcript:
+            transcript = "\n".join(
+                str(segment.get("text", "")).strip()
+                for segment in whisper_result.get("segments", [])
+                if str(segment.get("text", "")).strip()
+            )
+        if not transcript:
+            raise SttError("WhisperX 결과에서 전사 텍스트를 찾을 수 없습니다.")
+        return transcript
+
+    result = transcribe_crisperwhisper(input_path, language)
+    transcript = str(result.get("text", "")).strip()
+    if not transcript:
+        raise SttError("CrisperWhisper 결과에서 전사 텍스트를 찾을 수 없습니다.")
+    return transcript
+
+
+def transcribe_crisperwhisper(input_path, language=None, word_timestamps=False):
+    """CrisperWhisper 가상환경에서 입력 파일을 전사한다."""
+    if not CRISPERWHISPER_PYTHON_EXECUTABLE.is_file():
+        raise SttError(
+            "CrisperWhisper 가상환경 Python을 찾을 수 없습니다: " f"{CRISPERWHISPER_PYTHON_EXECUTABLE}"
+        )
+
+    with tempfile.TemporaryDirectory(prefix="stt_crisperwhisper_") as temp_dir:
+        temp_path = Path(temp_dir)
+        audio_path = convert_to_audio_file(input_path.resolve(), temp_path / "audio.wav")
+        result_path = temp_path / "result.json"
+        command = [
+            str(CRISPERWHISPER_PYTHON_EXECUTABLE),
+            "-c",
+            CRISPERWHISPER_RUNNER,
+            str(audio_path),
+            (language or "en").split("-")[0].lower(),
+            str(result_path),
+            "1" if word_timestamps else "0",
+        ]
+        print(f"CrisperWhisper 실행 Python: {CRISPERWHISPER_PYTHON_EXECUTABLE}", flush=True)
+        process = subprocess.run(command, check=False)
+        if process.returncode != 0:
+            raise SttError("CrisperWhisper 실행에 실패했습니다. " f"종료 코드: {process.returncode}")
+        try:
+            return json.loads(result_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise SttError("CrisperWhisper 결과 JSON을 읽을 수 없습니다.") from error
+
+
+def get_model_result(input_path, model_name, language=None, word_timestamps=False):
+    """선택한 로컬 모델의 결과를 WhisperX JSON 형식으로 반환한다."""
+    if model_name == "whisper":
+        return get_whisper_result(input_path, language)
+
+    return transcribe_crisperwhisper(input_path, language, word_timestamps)
+
+
 def parse_args(argv=None):
     """명령행 인수를 읽는다."""
     parser = argparse.ArgumentParser(
@@ -766,6 +925,9 @@ def parse_args(argv=None):
         epilog='''명령 예제:
   python stt.py input.mp3 --api google --lang ko
   python stt.py input.mp3 --api openai --lang en
+  python stt.py --model whisper input.mp3
+  python stt.py -m cw input.mp3 --lang ko
+  python stt.py -m w input.mp3 --format vtt --position 4
   python stt.py song.srt --format vtt --position 4
   python stt.py song.vtt --format lrc
   python stt.py song.lrc --format srt
@@ -781,8 +943,16 @@ def parse_args(argv=None):
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--api", choices=("google", "openai"), help="사용할 음성 인식 API")
     mode.add_argument("--lyrics", type=Path, help="시간 정보를 추가할 가사 파일")
+    mode.add_argument(
+        "-m",
+        "--model",
+        type=normalize_model_name,
+        metavar="모델",
+        help="사용할 로컬 모델: whisper(w), crisperwhisper(cw)",
+    )
     parser.add_argument(
-        "--lang", help="오디오 언어 코드 (가사 모드는 생략 시 자동 감지, API 모드는 기본값 ko)"
+        "--lang",
+        help=("오디오 언어 코드 (가사/Whisper는 생략 시 자동 감지, " "API는 ko, CrisperWhisper는 en)"),
     )
     parser.add_argument(
         "--format", choices=("srt", "vtt", "sbv", "lrc"), help="자막 출력 형식 (--lyrics 생략 시 자동 인식)"
@@ -797,8 +967,8 @@ def parse_args(argv=None):
         parser.print_help()
         return None
     args = parser.parse_args(argv)
-    if not (args.api or args.lyrics or args.format):
-        parser.error("--api, --lyrics 또는 --format 중 하나가 필요합니다.")
+    if not (args.api or args.lyrics or args.model or args.format):
+        parser.error("--api, --model, --lyrics 또는 --format 중 하나가 필요합니다.")
     if args.api and args.format:
         parser.error("--api와 --format은 함께 사용할 수 없습니다.")
     if args.format == "vtt" and args.position and re.fullmatch(r"[0-9]+", args.position):
@@ -822,7 +992,12 @@ def main(argv=None):
     elif args.lyrics:
         print(f"작업 시작: {args.input_file} 음성을 분석하여 {args.lyrics} 가사에 시간 정보 추가", flush=True)
     elif args.format:
-        print(f"작업 시작: WhisperX로 {args.input_file} 자동 자막 생성", flush=True)
+        print(
+            f"작업 시작: {args.model or 'whisper'} 모델로 " f"{args.input_file} 자동 자막 생성",
+            flush=True,
+        )
+    elif args.model:
+        print(f"작업 시작: {args.model} 모델로 {args.input_file} 음성을 텍스트로 변환", flush=True)
     else:
         print(f"작업 시작: {args.api} API로 {args.input_file} 음성을 텍스트로 변환", flush=True)
     print(f"작업 시작 시간: {start_time:%Y-%m-%d %H:%M:%S}", flush=True)
@@ -853,8 +1028,23 @@ def main(argv=None):
 
     if args.format:
         output_path, result = create_auto_subtitles(
-            args.input_file, args.format, args.lang, args.position, args.extend
+            args.input_file,
+            args.format,
+            args.lang,
+            args.position,
+            args.extend,
+            args.model or "whisper",
         )
+        end_time = datetime.now()
+        elapsed_seconds = time.perf_counter() - start_counter
+        print(result)
+        print(f"저장 파일: {output_path}")
+        print(format_execution_time(end_time, elapsed_seconds))
+        return
+
+    if args.model:
+        result = transcribe_model(args.input_file, args.model, args.lang)
+        output_path = save_transcript(args.input_file, result)
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
         print(result)
