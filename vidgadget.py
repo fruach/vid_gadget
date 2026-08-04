@@ -210,7 +210,7 @@ class VidGadgetApp:
             # r"D:\_Python\app\vidGadget\bak\down-c.flac",
             # r"D:\_Python\app\vidGadget\bak\timeF.flac",
             # r"D:\_Python\app\vidGadget\bak\timeM.flac",
-            r"D:\ham.mkv",
+            # r"D:\ham.mkv",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):

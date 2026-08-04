@@ -13,6 +13,7 @@ crisperwhisper 모델 다운로드를 위해서 hf login 필요: C:\Python\venv\
 
 import argparse
 import difflib
+import hashlib
 import importlib
 import json
 import math
@@ -67,26 +68,62 @@ model = CrisperWhisperModel(
     device="cuda",
     compute_type="float16",
 )
-result = model.transcribe(
-    sys.argv[1],
-    language=sys.argv[2],
-    word_timestamps=sys.argv[4] == "1",
-)
-if not result.text.strip():
-    print(
-        "CrisperWhisper 빈 결과: 첫 토큰 EOT 억제 후 intended 모드로 재시도합니다.",
-        file=sys.stderr,
-        flush=True,
+reference_text = Path(sys.argv[5]).read_text(encoding="utf-8") if sys.argv[5] else None
+reference_method = sys.argv[6]
+if reference_text and reference_method == "verbatimize":
+    result = model.verbatimize(
+        sys.argv[1],
+        reference_text,
+        language=sys.argv[2],
+        word_timestamps=True,
     )
+elif reference_text:
     engine = model._engine
     engine.model.generation_config.begin_suppress_tokens = [engine.eot_id]
     engine.model.config.begin_suppress_tokens = [engine.eot_id]
+    result = model.forced_align(
+        sys.argv[1],
+        reference_text,
+        language=sys.argv[2],
+        mode="intended",
+    )
+else:
+    word_timestamps = sys.argv[4] == "1"
+    if word_timestamps:
+        engine = model._engine
+        engine.model.generation_config.begin_suppress_tokens = [engine.eot_id]
+        engine.model.config.begin_suppress_tokens = [engine.eot_id]
     result = model.transcribe(
         sys.argv[1],
         language=sys.argv[2],
-        mode="intended",
-        word_timestamps=sys.argv[4] == "1",
+        mode="intended" if word_timestamps else "verbatim",
+        word_timestamps=word_timestamps,
+        chunk_duration=10.0 if word_timestamps else 30.0,
+        stride=8.0 if word_timestamps else 26.0,
+        context_words=4 if word_timestamps else 12,
+        drop_words=1 if word_timestamps else 2,
+        temperature_fallback=not word_timestamps,
     )
+    if not result.text.strip():
+        print(
+            "CrisperWhisper 빈 결과: 첫 토큰 EOT 억제 후 intended 모드로 재시도합니다.",
+            file=sys.stderr,
+            flush=True,
+        )
+        engine = model._engine
+        engine.model.generation_config.begin_suppress_tokens = [engine.eot_id]
+        engine.model.config.begin_suppress_tokens = [engine.eot_id]
+        result = model.transcribe(
+            sys.argv[1],
+            language=sys.argv[2],
+            mode="intended",
+            word_timestamps=word_timestamps,
+            chunk_duration=10.0 if word_timestamps else 30.0,
+            stride=8.0 if word_timestamps else 26.0,
+            context_words=4 if word_timestamps else 12,
+            drop_words=1 if word_timestamps else 2,
+            temperature_fallback=not word_timestamps,
+        )
 payload = {
     "text": result.text,
     "word_segments": [
@@ -223,6 +260,31 @@ def get_audio_durations(audio_paths):
         except (TypeError, ValueError, json.JSONDecodeError) as error:
             raise SttError(f"오디오 길이를 확인할 수 없습니다: {audio_path}") from error
     return durations
+
+
+def get_audio_duration(audio_path):
+    """ffprobe로 입력 파일의 재생 시간을 초 단위로 구한다."""
+    if shutil.which("ffprobe") is None:
+        raise SttError("ffprobe를 찾을 수 없습니다. ffmpeg를 설치하고 PATH에 추가하세요.")
+
+    command = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(audio_path),
+    ]
+    result = subprocess.run(command, capture_output=True, check=False)
+    if result.returncode != 0:
+        detail = decode_subprocess_output(result.stderr) or "오디오 길이를 확인할 수 없습니다."
+        raise SttError(f"ffprobe 오류: {detail}")
+    try:
+        return float(decode_subprocess_output(result.stdout))
+    except ValueError as error:
+        raise SttError(f"오디오 길이를 확인할 수 없습니다: {audio_path}") from error
 
 
 def format_usage(api, durations):
@@ -428,7 +490,7 @@ def convert_subtitle_file(input_path, output_format, position=None, extension_se
 
 
 def separate_vocals(input_path):
-    """Audio Separator로 보컬 FLAC을 분리하거나 기존 보컬 파일을 재사용한다."""
+    """Audio Separator로 입력 파일 옆에 보컬 FLAC을 생성하거나 재사용한다."""
     input_path = input_path.resolve()
     vocal_path = input_path.with_name(f"{input_path.stem}-vocal.flac")
     if vocal_path.is_file():
@@ -438,47 +500,47 @@ def separate_vocals(input_path):
     if not AUDIO_SEPARATOR_EXECUTABLE.is_file():
         raise SttError(f"Audio Separator 실행 파일을 찾을 수 없습니다: {AUDIO_SEPARATOR_EXECUTABLE}")
 
-    with tempfile.TemporaryDirectory(prefix="stt_vocals_", dir=input_path.parent) as output_dir:
-        output_path = Path(output_dir)
-        command = [
-            str(AUDIO_SEPARATOR_EXECUTABLE),
-            str(input_path),
-            "--model_filename",
-            AUDIO_SEPARATOR_MODEL,
-            "--single_stem",
-            "Vocals",
-            "--output_format",
-            "FLAC",
-            "--output_dir",
-            str(output_path),
-            "--model_file_dir",
-            str(AUDIO_SEPARATOR_MODEL_DIR),
-        ]
-        print(f"Audio Separator 실행 명령: {subprocess.list2cmdline(command)}", flush=True)
-        result = subprocess.run(command, check=False)
-        if result.returncode != 0:
-            raise SttError(f"Audio Separator 실행에 실패했습니다. 종료 코드: {result.returncode}")
+    command = [
+        str(AUDIO_SEPARATOR_EXECUTABLE),
+        str(input_path),
+        "--model_filename",
+        AUDIO_SEPARATOR_MODEL,
+        "--single_stem",
+        "Vocals",
+        "--output_format",
+        "FLAC",
+        "--output_dir",
+        str(input_path.parent),
+        "--model_file_dir",
+        str(AUDIO_SEPARATOR_MODEL_DIR),
+        "--custom_output_names",
+        json.dumps({"Vocals": vocal_path.stem}, ensure_ascii=False),
+    ]
+    print(f"Audio Separator 실행 명령: {subprocess.list2cmdline(command)}", flush=True)
+    result = subprocess.run(command, check=False)
+    if result.returncode != 0:
+        raise SttError(f"Audio Separator 실행에 실패했습니다. 종료 코드: {result.returncode}")
 
-        vocal_paths = list(output_path.glob("*.flac"))
-        if len(vocal_paths) != 1:
-            raise SttError("Audio Separator 보컬 결과 FLAC 파일을 찾을 수 없습니다.")
-        vocal_paths[0].replace(vocal_path)
+    if not vocal_path.is_file():
+        raise SttError("Audio Separator 보컬 결과 FLAC 파일을 찾을 수 없습니다.")
     return vocal_path
 
 
-def get_whisper_result(input_path, language=None, prompt=None):
+def get_whisper_result(input_path, language=None, prompt=None, vocal_path=None):
     """WhisperX JSON을 생성하거나 기존 JSON을 읽어 반환한다."""
     input_path = input_path.resolve()
-    lyrics_result_path = input_path.with_name(f"{input_path.stem}-vocal.json")
+    lyrics_result_path = input_path.with_name(f"{input_path.stem}-whisper-vocal.json")
     if prompt:
-        audio_path = separate_vocals(input_path)
-        result_path = lyrics_result_path
+        audio_path = vocal_path.resolve() if vocal_path else input_path
+        result_path = input_path.with_name(
+            f"{input_path.stem}-whisper-{'vocal' if vocal_path else 'lyrics'}.json"
+        )
     elif lyrics_result_path.is_file():
         audio_path = input_path
         result_path = lyrics_result_path
     else:
         audio_path = input_path
-        result_path = input_path.with_name(f"{input_path.stem}-auto.json")
+        result_path = input_path.with_name(f"{input_path.stem}-whisper-auto.json")
     if result_path.is_file():
         print(f"기존 WhisperX JSON 파일 사용: {result_path}", flush=True)
     else:
@@ -521,9 +583,14 @@ def get_whisper_result(input_path, language=None, prompt=None):
 
 
 def add_lyrics_timestamps(
-    lyrics, whisper_result, output_format, position_setting=None, extension_seconds=3.0
+    lyrics,
+    recognition_result,
+    output_format,
+    position_setting=None,
+    extension_seconds=3.0,
+    audio_duration=None,
 ):
-    """WhisperX 단어 시각을 원문 가사 줄에 대응시켜 시간 가사 또는 자막으로 만든다."""
+    """인식된 단어 시각을 원문 가사 줄에 대응시켜 시간 가사 또는 자막으로 만든다."""
     lines = lyrics.splitlines()
     lyric_words = []
     word_line_indexes = []
@@ -544,7 +611,7 @@ def add_lyrics_timestamps(
     transcript_starts = []
     transcript_ends = []
     transcript_end = 0.0
-    for word_data in whisper_result.get("word_segments", []):
+    for word_data in recognition_result.get("word_segments", []):
         words = normalize_words(str(word_data.get("word", "")))
         start = word_data.get("start")
         if start is None:
@@ -597,36 +664,37 @@ def add_lyrics_timestamps(
             next_position = next_positions[0]
             next_start = line_starts[vocal_line_indexes[next_position]]
             line_starts[line_index] = next_start * position / next_position
-        else:
-            previous_position = previous_positions[-1]
-            previous_start = line_starts[vocal_line_indexes[previous_position]]
-            remaining_lines = len(vocal_line_indexes) - previous_position
-            final_end = max(transcript_end, previous_start + 1.0)
-            line_starts[line_index] = (
-                previous_start
-                + (final_end - previous_start) * (position - previous_position) / remaining_lines
-            )
+
+    timed_line_indexes = [
+        line_index
+        for line_index in vocal_line_indexes
+        if line_index in line_starts and (audio_duration is None or line_starts[line_index] < audio_duration)
+    ]
 
     if output_format in (None, "lrc"):
         return (
             "\n".join(
                 f"{format_lrc_timestamp(line_starts[line_index])}{line_texts[line_index]}"
-                for line_index in vocal_line_indexes
+                for line_index in timed_line_indexes
             )
             + "\n"
         )
 
     cues = []
-    for position, line_index in enumerate(vocal_line_indexes):
+    for position, line_index in enumerate(timed_line_indexes):
         start = line_starts[line_index]
         if line_index in line_ends:
             end = line_ends[line_index] + extension_seconds
-        elif position + 1 < len(vocal_line_indexes):
-            end = line_starts[vocal_line_indexes[position + 1]]
+        elif position + 1 < len(timed_line_indexes):
+            end = line_starts[timed_line_indexes[position + 1]]
         else:
             end = max(transcript_end, start + 0.5)
-        if position + 1 < len(vocal_line_indexes):
-            end = min(end, line_starts[vocal_line_indexes[position + 1]])
+        if position + 1 < len(timed_line_indexes):
+            end = min(end, line_starts[timed_line_indexes[position + 1]])
+        if audio_duration is not None:
+            end = min(end, audio_duration)
+        if end <= start:
+            continue
         timestamp_separator = "," if output_format == "sbv" else " --> "
         timestamp = (
             f"{format_subtitle_timestamp(start, output_format)}{timestamp_separator}"
@@ -635,7 +703,7 @@ def add_lyrics_timestamps(
         if output_format == "vtt" and position_setting:
             timestamp = f"{timestamp} {position_setting}"
         if output_format == "srt":
-            cues.append(f"{position + 1}\n{timestamp}\n{line_texts[line_index]}")
+            cues.append(f"{len(cues) + 1}\n{timestamp}\n{line_texts[line_index]}")
         else:
             cues.append(f"{timestamp}\n{line_texts[line_index]}")
 
@@ -717,9 +785,10 @@ def create_auto_subtitles(
     position=None,
     extension_seconds=3.0,
     model_name="whisper",
+    audio_path=None,
 ):
     """로컬 모델의 자동 인식 결과로 SRT, VTT, SBV 또는 LRC 자막을 저장한다."""
-    whisper_result = get_model_result(input_path, model_name, language, word_timestamps=True)
+    whisper_result = get_model_result(audio_path or input_path, model_name, language, word_timestamps=True)
     subtitles = format_whisper_subtitles(whisper_result, output_format, position, extension_seconds)
     output_path = input_path.with_suffix(f".{output_format}")
     number = 1
@@ -731,18 +800,50 @@ def create_auto_subtitles(
 
 
 def create_timed_lyrics(
-    input_path, lyrics_path, output_format, language=None, position=None, extension_seconds=3.0
+    input_path,
+    lyrics_path,
+    output_format,
+    language=None,
+    position=None,
+    extension_seconds=3.0,
+    model_name="whisper",
+    vocal_path=None,
 ):
-    """WhisperX JSON을 생성하거나 재사용해 시간 정보가 추가된 가사 파일을 저장한다."""
+    """모델 결과를 생성하거나 재사용해 시간 정보가 추가된 가사 파일을 저장한다."""
     if not lyrics_path.is_file():
         raise SttError(f"가사 파일을 찾을 수 없습니다: {lyrics_path}")
 
     lyrics = lyrics_path.read_text(encoding="utf-8-sig")
     language = language or detect_lyrics_language(lyrics)
     lyrics_prompt = build_lyrics_prompt(lyrics)
-    whisper_result = get_whisper_result(input_path, language, lyrics_prompt)
+    audio_path = vocal_path or input_path
+    audio_duration = get_audio_duration(input_path.resolve())
+    if model_name == "crisperwhisper":
+        recognition_result = get_model_result(
+            audio_path,
+            model_name,
+            language,
+            word_timestamps=True,
+            reference_text=lyrics_prompt,
+            reference_method="verbatimize",
+        )
+        word_segments = recognition_result.get("word_segments", [])
+        if audio_duration > 30 and word_segments:
+            word_segments[-1]["end"] = max(
+                float(word_segments[-1]["end"]),
+                audio_duration - extension_seconds,
+            )
+    else:
+        recognition_result = get_whisper_result(input_path, language, lyrics_prompt, vocal_path)
 
-    timed_lyrics = add_lyrics_timestamps(lyrics, whisper_result, output_format, position, extension_seconds)
+    timed_lyrics = add_lyrics_timestamps(
+        lyrics,
+        recognition_result,
+        output_format,
+        position,
+        extension_seconds,
+        audio_duration,
+    )
     if output_format is None:
         output_path = lyrics_path.with_name(f"{lyrics_path.stem}-time.txt")
     else:
@@ -766,6 +867,11 @@ def format_execution_time(end_time, elapsed_seconds):
         f"종료 시간: {end_time:%Y-%m-%d %H:%M:%S}\n"
         f"걸린 시간: {hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
     )
+
+
+def print_subtitle_preview(subtitles):
+    """자막 생성 결과의 처음 6줄만 화면에 출력한다."""
+    print("\n".join(subtitles.splitlines()[:6]))
 
 
 def transcribe_google(audio_paths, language):
@@ -879,8 +985,41 @@ def transcribe_model(input_path, model_name, language=None):
     return transcript
 
 
-def transcribe_crisperwhisper(input_path, language=None, word_timestamps=False):
+def transcribe_crisperwhisper(
+    input_path,
+    language=None,
+    word_timestamps=False,
+    reference_text=None,
+    reference_method="forced_align",
+):
     """CrisperWhisper 가상환경에서 입력 파일을 전사한다."""
+    input_path = input_path.resolve()
+    language = (language or "en").split("-")[0].lower()
+    cache_kind = "lyrics" if reference_text else "words" if word_timestamps else "auto"
+    cache_path = input_path.with_name(f"{input_path.stem}-crisperwhisper-{cache_kind}.json")
+    input_stat = input_path.stat()
+    cache_metadata = {
+        "audio_size": input_stat.st_size,
+        "audio_mtime_ns": input_stat.st_mtime_ns,
+        "language": language,
+        "word_timestamps": bool(word_timestamps or reference_text),
+        "reference_sha256": (
+            hashlib.sha256(reference_text.encode("utf-8")).hexdigest() if reference_text else None
+        ),
+        "reference_method": reference_method if reference_text else None,
+        "transcription_profile": (
+            "subtitle_chunks_v3" if word_timestamps and not reference_text else "default"
+        ),
+    }
+    if cache_path.is_file():
+        try:
+            cached_result = json.loads(cache_path.read_text(encoding="utf-8"))
+            if cached_result.get("_cache") == cache_metadata:
+                print(f"기존 CrisperWhisper JSON 파일 사용: {cache_path}", flush=True)
+                return cached_result
+        except (OSError, json.JSONDecodeError):
+            pass
+
     if not CRISPERWHISPER_PYTHON_EXECUTABLE.is_file():
         raise SttError(
             "CrisperWhisper 가상환경 Python을 찾을 수 없습니다: " f"{CRISPERWHISPER_PYTHON_EXECUTABLE}"
@@ -888,33 +1027,72 @@ def transcribe_crisperwhisper(input_path, language=None, word_timestamps=False):
 
     with tempfile.TemporaryDirectory(prefix="stt_crisperwhisper_") as temp_dir:
         temp_path = Path(temp_dir)
-        audio_path = convert_to_audio_file(input_path.resolve(), temp_path / "audio.wav")
+        audio_path = convert_to_audio_file(input_path, temp_path / "audio.wav")
         result_path = temp_path / "result.json"
+        reference_path = temp_path / "reference.txt"
+        if reference_text:
+            reference_path.write_text(reference_text, encoding="utf-8")
         command = [
             str(CRISPERWHISPER_PYTHON_EXECUTABLE),
             "-c",
             CRISPERWHISPER_RUNNER,
             str(audio_path),
-            (language or "en").split("-")[0].lower(),
+            language,
             str(result_path),
             "1" if word_timestamps else "0",
+            str(reference_path) if reference_text else "",
+            reference_method,
         ]
         print(f"CrisperWhisper 실행 Python: {CRISPERWHISPER_PYTHON_EXECUTABLE}", flush=True)
         process = subprocess.run(command, check=False)
         if process.returncode != 0:
             raise SttError("CrisperWhisper 실행에 실패했습니다. " f"종료 코드: {process.returncode}")
         try:
-            return json.loads(result_path.read_text(encoding="utf-8"))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as error:
             raise SttError("CrisperWhisper 결과 JSON을 읽을 수 없습니다.") from error
+        word_segments = result.get("word_segments", [])
+        if word_timestamps and not reference_text and len(word_segments) >= 2:
+            last_word = word_segments[-1]
+            previous_word = word_segments[-2]
+            normalized_last_word = re.sub(r"[^a-z]", "", str(last_word.get("word", "")).casefold())
+            audio_duration = get_audio_duration(input_path)
+            if (
+                normalized_last_word in {"mm", "mhm", "mmhmm", "hmm"}
+                and audio_duration - float(last_word["start"]) <= 3.0
+                and float(last_word["start"]) - float(previous_word["end"]) >= 0.5
+            ):
+                word_segments.pop()
+                result["text"] = re.sub(
+                    rf"\s*{re.escape(str(last_word['word']))}\s*$",
+                    "",
+                    str(result.get("text", "")),
+                )
+        result["_cache"] = cache_metadata
+        cache_path.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+        print(f"CrisperWhisper JSON 저장 파일: {cache_path}", flush=True)
+        return result
 
 
-def get_model_result(input_path, model_name, language=None, word_timestamps=False):
+def get_model_result(
+    input_path,
+    model_name,
+    language=None,
+    word_timestamps=False,
+    reference_text=None,
+    reference_method="forced_align",
+):
     """선택한 로컬 모델의 결과를 WhisperX JSON 형식으로 반환한다."""
     if model_name == "whisper":
         return get_whisper_result(input_path, language)
 
-    return transcribe_crisperwhisper(input_path, language, word_timestamps)
+    return transcribe_crisperwhisper(
+        input_path,
+        language,
+        word_timestamps,
+        reference_text,
+        reference_method,
+    )
 
 
 def parse_args(argv=None):
@@ -937,18 +1115,24 @@ def parse_args(argv=None):
   python stt.py input.flac --lyrics input.txt
   python stt.py input.flac --lyrics song.txt --format srt
   python stt.py input.flac --lyrics song.txt --format vtt --lang en
+  python stt.py -m w input.mp3 --lyrics lyrics.txt --format vtt --position 4
+  python stt.py -m cw input.mp3 --lyrics lyrics.txt --format vtt --position 4
+  python stt.py -m w input.mp3 --lyrics lyrics.txt --gen-vocal --format vtt
+  python stt.py input.mp3 --gen-vocal
   python stt.py input.flac --lyrics input.txt --format vtt --position "line:-4 position:50% align:center"''',
     )
     parser.add_argument("input_file", metavar="입력파일", type=Path, help="오디오, 동영상 또는 자막 파일")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--api", choices=("google", "openai"), help="사용할 음성 인식 API")
-    mode.add_argument("--lyrics", type=Path, help="시간 정보를 추가할 가사 파일")
     mode.add_argument(
+        "--api", choices=("google", "openai"), help="사용할 음성 인식 API(WhisperX가 더 성능 좋음)"
+    )
+    mode.add_argument("--lyrics", type=Path, help="시간 정보를 추가할 가사 파일")
+    parser.add_argument(
         "-m",
         "--model",
         type=normalize_model_name,
         metavar="모델",
-        help="사용할 로컬 모델: whisper(w), crisperwhisper(cw)",
+        help="사용할 로컬 모델: whisper(w), CrisperWhisper(cw)",
     )
     parser.add_argument(
         "--lang",
@@ -960,6 +1144,11 @@ def parse_args(argv=None):
     parser.add_argument(
         "--position", help="VTT 자막 위치 설정 (예: 4 또는 line:-4 position:50%% align:center)"
     )
+    parser.add_argument(
+        "--gen-vocal",
+        action="store_true",
+        help="음성을 추출해서 인식에 사용",
+    )
     parser.add_argument("--extend", type=float, default=3.0, help="자막 표시 연장 시간(초, 기본값: 3)")
     if argv is None:
         argv = sys.argv[1:]
@@ -967,10 +1156,12 @@ def parse_args(argv=None):
         parser.print_help()
         return None
     args = parser.parse_args(argv)
-    if not (args.api or args.lyrics or args.model or args.format):
-        parser.error("--api, --model, --lyrics 또는 --format 중 하나가 필요합니다.")
+    if not (args.api or args.lyrics or args.model or args.format or args.gen_vocal):
+        parser.error("--api, --model, --lyrics, --format 또는 --gen-vocal 중 하나가 필요합니다.")
     if args.api and args.format:
         parser.error("--api와 --format은 함께 사용할 수 없습니다.")
+    if args.api and args.model:
+        parser.error("--api와 --model은 함께 사용할 수 없습니다.")
     if args.format == "vtt" and args.position and re.fullmatch(r"[0-9]+", args.position):
         args.position = f"line:-{args.position} position:50% align:center"
     if not math.isfinite(args.extend) or args.extend < 0:
@@ -990,14 +1181,21 @@ def main(argv=None):
     if is_subtitle_input:
         print(f"작업 시작: {args.input_file} 자막을 {args.format or '미지정'} 형식으로 변환", flush=True)
     elif args.lyrics:
-        print(f"작업 시작: {args.input_file} 음성을 분석하여 {args.lyrics} 가사에 시간 정보 추가", flush=True)
+        print(
+            f"작업 시작: {args.model or 'whisper'} 모델로 {args.input_file} 음성을 분석하여 "
+            f"{args.lyrics} 가사에 시간 정보 추가",
+            flush=True,
+        )
     elif args.format:
         print(
             f"작업 시작: {args.model or 'whisper'} 모델로 " f"{args.input_file} 자동 자막 생성",
             flush=True,
         )
-    elif args.model:
-        print(f"작업 시작: {args.model} 모델로 {args.input_file} 음성을 텍스트로 변환", flush=True)
+    elif args.model or args.gen_vocal:
+        print(
+            f"작업 시작: {args.model or 'whisper'} 모델로 " f"{args.input_file} 음성을 텍스트로 변환",
+            flush=True,
+        )
     else:
         print(f"작업 시작: {args.api} API로 {args.input_file} 음성을 텍스트로 변환", flush=True)
     print(f"작업 시작 시간: {start_time:%Y-%m-%d %H:%M:%S}", flush=True)
@@ -1010,18 +1208,28 @@ def main(argv=None):
         output_path, result = convert_subtitle_file(args.input_file, args.format, args.position, args.extend)
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
-        print(result)
+        print_subtitle_preview(result)
         print(f"저장 파일: {output_path}")
         print(format_execution_time(end_time, elapsed_seconds))
         return
 
+    vocal_path = separate_vocals(args.input_file) if args.gen_vocal else None
+    audio_path = vocal_path or args.input_file
+
     if args.lyrics:
         output_path, result = create_timed_lyrics(
-            args.input_file, args.lyrics, args.format, args.lang, args.position, args.extend
+            args.input_file,
+            args.lyrics,
+            args.format,
+            args.lang,
+            args.position,
+            args.extend,
+            args.model or "whisper",
+            vocal_path,
         )
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
-        print(result)
+        print_subtitle_preview(result)
         print(f"저장 파일: {output_path}")
         print(format_execution_time(end_time, elapsed_seconds))
         return
@@ -1034,16 +1242,17 @@ def main(argv=None):
             args.position,
             args.extend,
             args.model or "whisper",
+            audio_path,
         )
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
-        print(result)
+        print_subtitle_preview(result)
         print(f"저장 파일: {output_path}")
         print(format_execution_time(end_time, elapsed_seconds))
         return
 
-    if args.model:
-        result = transcribe_model(args.input_file, args.model, args.lang)
+    if args.model or args.gen_vocal:
+        result = transcribe_model(audio_path, args.model or "whisper", args.lang)
         output_path = save_transcript(args.input_file, result)
         end_time = datetime.now()
         elapsed_seconds = time.perf_counter() - start_counter
@@ -1053,7 +1262,7 @@ def main(argv=None):
         return
 
     with tempfile.TemporaryDirectory(prefix="stt_") as temp_dir:
-        audio_paths = convert_to_audio_chunks(args.input_file, Path(temp_dir))
+        audio_paths = convert_to_audio_chunks(audio_path, Path(temp_dir))
         durations = get_audio_durations(audio_paths)
         if args.api == "google":
             result = transcribe_google(audio_paths, args.lang or "ko")
