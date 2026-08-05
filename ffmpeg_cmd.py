@@ -550,23 +550,34 @@ class FFmpegCommandBuilder:
         if ratio_w <= 0 or ratio_h <= 0 or src_w <= 0 or src_h <= 0:
             return None
 
-        # 원본 안에 들어가는 최대 크기 (비율 유지, 짝수로)
-        if src_w * ratio_h > src_h * ratio_w:  # 원본이 더 넓음 → 높이 기준
-            crop_w = int(src_h * ratio_w / ratio_h)
-            crop_h = src_h
-        else:
-            crop_w = src_w
-            crop_h = int(src_w * ratio_h / ratio_w)
-        crop_w -= crop_w % 2
-        crop_h -= crop_h % 2
-
-        # 시작 위치 — 미입력이면 가운데, 입력이면 화면 밖으로 나가지 않게 보정
+        # 입력한 시작 좌표를 유지하면서 원본 안에 들어가는 최대 크기 계산
         x = self.settings.get("crop_x")
         y = self.settings.get("crop_y")
-        x = (src_w - crop_w) // 2 if x is None else max(0, min(x, src_w - crop_w))
-        y = (src_h - crop_h) // 2 if y is None else max(0, min(y, src_h - crop_h))
+        x = None if x is None else max(0, min(x, src_w - 1))
+        y = None if y is None else max(0, min(y, src_h - 1))
+        available_w = src_w if x is None else src_w - x
+        available_h = src_h if y is None else src_h - y
 
-        return crop_w, crop_h, x - x % 2, y - y % 2
+        if available_w * ratio_h > available_h * ratio_w:  # 남은 영역이 더 넓음 → 높이 기준
+            crop_w = int(available_h * ratio_w / ratio_h)
+            crop_h = available_h
+        else:
+            crop_w = available_w
+            crop_h = int(available_w * ratio_h / ratio_w)
+        crop_w -= crop_w % 2
+        crop_h -= crop_h % 2
+        if crop_w <= 0 or crop_h <= 0:
+            return None
+
+        # 시작 위치 미입력 시 가운데 자동 정렬
+        if x is None:
+            x = (src_w - crop_w) // 2
+            x -= x % 2
+        if y is None:
+            y = (src_h - crop_h) // 2
+            y -= y % 2
+
+        return crop_w, crop_h, x, y
 
     def _get_scale_command(self) -> str:
         """크롭/해상도 변경 명령어"""
@@ -582,7 +593,7 @@ class FFmpegCommandBuilder:
 
         if crop_rect:
             crop_w, crop_h, crop_x, crop_y = crop_rect
-            filters.append(f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}")
+            filters.append(f"crop=w={crop_w}:h={crop_h}:x={crop_x}:y={crop_y}:exact=1")
             src_w, src_h = crop_w, crop_h
 
         if p720 or p1080:
