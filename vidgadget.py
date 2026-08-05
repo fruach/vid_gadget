@@ -19,6 +19,17 @@ import importlib.util
 
 _VERSION_STR = "1.44"
 _BUILD_DATE_STR = "2026-06-29"
+
+# .env 로드 (선택사항)
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+except ImportError:
+    pass
+
+APP_DEBUG = os.getenv("APP_DEBUG", "").strip().lower() == "true"
+
 # 드래그 앤 드롭 지원
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -212,14 +223,15 @@ class VidGadgetApp:
     def init_prj(self):
         """프로젝트 초기화 작업"""
         print("start")
-        test_files = [
-            # r"D:\_Python\app\vidGadget\bak\Robot.Dreams.mp4",
-            # r"D:\_Python\app\vidGadget\bak\down-c.flac",
-            r"d:\you.wmv",
-        ]
-        for test_file in test_files:
-            if os.path.isfile(test_file):
-                self.file_listbox.insert(tk.END, test_file)
+        if APP_DEBUG:
+            test_files = [
+                # r"D:\Dreams.mp4",
+                # r"D:\down-c.flac",
+                r"d:\you.wmv",
+            ]
+            for test_file in test_files:
+                if os.path.isfile(test_file):
+                    self.file_listbox.insert(tk.END, test_file)
 
         if self.file_listbox.size() > 0:
             self.file_listbox.selection_set(0)

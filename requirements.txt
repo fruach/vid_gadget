@@ -12,5 +12,8 @@ pymediainfo>=6.0.0
 # 오디오 Normalization (FFmpeg loudnorm 2-pass 래퍼)
 ffmpeg-normalize>=1.37.8
 
+# .env 로드 (선택사항 - APP_DEBUG 등)
+python-dotenv>=1.0.0
+
 # 빌드/배포
 # pyinstaller>=6.0.0
