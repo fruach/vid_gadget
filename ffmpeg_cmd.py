@@ -63,7 +63,7 @@ class FFmpegCommandBuilder:
     """FFmpeg 명령어 생성 클래스"""
 
     def __init__(self, settings: dict, media_info: MEDIA_INFO):
-        self.settings = settings
+        self.settings = dict(settings)  # 크롭 시 내부에서 설정을 덮어쓰므로 복사본 사용
         self.media_info = media_info
         self.format_dest = FORMAT_VIDEO
         self._normalization_output_file = None
@@ -377,11 +377,20 @@ class FFmpegCommandBuilder:
         output_codec = self.settings.get("output_codec", CODEC_265)
         process_kind = self.settings.get("process_kind", PROC_KIND_CONVERT)
 
-        # 출력 파일명 결정
-        output_file = get_output_filename(input_file, output_codec, self.settings, self.media_info)
-
         # 출력 포맷 결정
         self._determine_format_dest(output_codec)
+
+        # 크롭: 출력은 mp4 고정, 오디오는 복사(mp4 호환이 아니면 자동으로 aac 인코딩)
+        if self._get_crop_rect():
+            self.settings["crop_applied"] = True  # 출력 파일명에 _cr 추가
+            self.settings["mp4"] = True
+            self.settings["mkv"] = False
+            self.settings["audio_copy"] = True
+            self.settings["video_copy"] = False  # 크롭은 재인코딩 필요
+            self._range_copy = False
+
+        # 출력 파일명 결정
+        output_file = get_output_filename(input_file, output_codec, self.settings, self.media_info)
 
         # 각 부분 생성
         video_codec_input = self._get_video_codec_input()
@@ -431,8 +440,8 @@ class FFmpegCommandBuilder:
         p720 = self.settings.get("p720", False)
         p1080 = self.settings.get("p1080", False)
 
-        # GPU 가속 설정
-        if gpu and (p720 or p1080) and not bit10:
+        # GPU 가속 설정 (크롭은 CPU 필터이므로 CUDA 프레임으로 디코딩하지 않음)
+        if gpu and (p720 or p1080) and not bit10 and not self._get_crop_rect():
             return "-hwaccel cuda -hwaccel_output_format cuda"
 
         # 입력 코덱별 설정
@@ -522,40 +531,91 @@ class FFmpegCommandBuilder:
             quant = self.settings.get("video_quant", 20)
             return f"-qp {quant}"
 
+    def _get_crop_rect(self):
+        """크롭 영역 계산 — (너비, 높이, x, y) 또는 None"""
+        if not self.settings.get("crop", False):
+            return None
+
+        # 동영상 인코딩 출력일 때만 크롭 적용
+        if self.settings.get("output_codec", CODEC_265) not in (CODEC_264, CODEC_265, CODEC_AV1):
+            return None
+        if self.media_info.codec in (CODEC_GIF, CODEC_WEBP):
+            return None
+
+        ratio_w = self.settings.get("crop_w") or 0
+        ratio_h = self.settings.get("crop_h") or 0
+        src_w = self.media_info.width
+        src_h = self.media_info.height
+
+        if ratio_w <= 0 or ratio_h <= 0 or src_w <= 0 or src_h <= 0:
+            return None
+
+        # 원본 안에 들어가는 최대 크기 (비율 유지, 짝수로)
+        if src_w * ratio_h > src_h * ratio_w:  # 원본이 더 넓음 → 높이 기준
+            crop_w = int(src_h * ratio_w / ratio_h)
+            crop_h = src_h
+        else:
+            crop_w = src_w
+            crop_h = int(src_w * ratio_h / ratio_w)
+        crop_w -= crop_w % 2
+        crop_h -= crop_h % 2
+
+        # 시작 위치 — 미입력이면 가운데, 입력이면 화면 밖으로 나가지 않게 보정
+        x = self.settings.get("crop_x")
+        y = self.settings.get("crop_y")
+        x = (src_w - crop_w) // 2 if x is None else max(0, min(x, src_w - crop_w))
+        y = (src_h - crop_h) // 2 if y is None else max(0, min(y, src_h - crop_h))
+
+        return crop_w, crop_h, x - x % 2, y - y % 2
+
     def _get_scale_command(self) -> str:
-        """해상도 변경 명령어"""
+        """크롭/해상도 변경 명령어"""
         p720 = self.settings.get("p720", False)
         p1080 = self.settings.get("p1080", False)
         gpu = self.settings.get("gpu", False)
         bit10 = self.settings.get("bit10", False)
+        crop_rect = self._get_crop_rect()
 
-        if not p720 and not p1080:
+        filters = []
+        src_w = self.media_info.width
+        src_h = self.media_info.height
+
+        if crop_rect:
+            crop_w, crop_h, crop_x, crop_y = crop_rect
+            filters.append(f"crop={crop_w}:{crop_h}:{crop_x}:{crop_y}")
+            src_w, src_h = crop_w, crop_h
+
+        if p720 or p1080:
+            # 목표 해상도
+            if p1080:
+                target_w = 1920
+                target_h = 1080
+            else:
+                target_w = 1280
+                target_h = 720
+
+            # 세로 크기 계산 (비율 유지, 짝수로)
+            if src_w > 0:
+                new_h = round((src_h * target_w) / src_w)
+                new_h += new_h % 2  # 짝수로
+                target_h = new_h
+
+            # 스케일러 선택 (크롭 시에는 시스템 메모리 프레임이므로 업로드 필요)
+            if gpu:
+                if bit10 or crop_rect:
+                    scaler = "hwupload_cuda,scale_cuda"
+                else:
+                    scaler = "scale_cuda"
+            else:
+                scaler = "scale"
+
+            filters.append(f"{scaler}={target_w}:{target_h}")
+
+        if not filters:
             return ""
 
-        # 목표 해상도
-        if p1080:
-            target_w = 1920
-            target_h = 1080
-        else:
-            target_w = 1280
-            target_h = 720
-
-        # 세로 크기 계산 (비율 유지, 짝수로)
-        if self.media_info.width > 0:
-            new_h = round((self.media_info.height * target_w) / self.media_info.width)
-            new_h += new_h % 2  # 짝수로
-            target_h = new_h
-
-        # 스케일러 선택
-        if gpu:
-            if bit10:
-                scaler = "hwupload_cuda,scale_cuda"
-            else:
-                scaler = "scale_cuda"
-        else:
-            scaler = "scale"
-
-        return f'-vf "{scaler}={target_w}:{target_h}"'
+        chain = ",".join(filters)
+        return f'-vf "{chain}"'
 
     def _get_audio_command(self, process_kind: int, output_file: Optional[str] = None) -> str:
         """오디오 명령어 생성 (C++ CmdGet 오디오 섹션 대응)"""

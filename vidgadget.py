@@ -162,6 +162,13 @@ class VidGadgetApp:
         self.bit10_var = tk.BooleanVar(value=False)
         self.cfr_var = tk.BooleanVar(value=False)
 
+        # 크롭
+        self.crop_var = tk.BooleanVar(value=False)
+        self.crop_w_var = tk.StringVar(value="9")
+        self.crop_h_var = tk.StringVar(value="16")
+        self.crop_sx_var = tk.StringVar(value="")
+        self.crop_sy_var = tk.StringVar(value="")
+
         # 비디오 품질
         self.quality_type = tk.StringVar(value="quant")  # "sample" or "quant"
         self.video_sample_var = tk.StringVar(value="3000")
@@ -208,9 +215,7 @@ class VidGadgetApp:
         test_files = [
             # r"D:\_Python\app\vidGadget\bak\Robot.Dreams.mp4",
             # r"D:\_Python\app\vidGadget\bak\down-c.flac",
-            # r"D:\_Python\app\vidGadget\bak\timeF.flac",
-            # r"D:\_Python\app\vidGadget\bak\timeM.flac",
-            # r"D:\ham.mkv",
+            r"d:\you.wmv",
         ]
         for test_file in test_files:
             if os.path.isfile(test_file):
@@ -256,6 +261,12 @@ class VidGadgetApp:
         except (KeyError, TypeError, ValueError):
             pass
 
+        # 크롭 비율 최근 사용값 복원
+        for key, var in (("crop_w", self.crop_w_var), ("crop_h", self.crop_h_var)):
+            value = cfg.get(key)
+            if value is not None:
+                var.set(str(value))
+
     def save_geometry(self):
         """현재 창 위치/크기 저장"""
         if self.root.state() == "iconic":
@@ -277,6 +288,10 @@ class VidGadgetApp:
             x, y, _, _ = self._clamp_geometry(x, y, 600, 500)
             cfg["media_info_x"] = x
             cfg["media_info_y"] = y
+
+        # 크롭 비율 최근 사용값 저장
+        cfg["crop_w"] = self.crop_w_var.get()
+        cfg["crop_h"] = self.crop_h_var.get()
 
         with open(self._config_path(), "w") as f:
             json.dump(cfg, f)
@@ -589,6 +604,29 @@ class VidGadgetApp:
         )
         cb_cfr.pack(side=tk.LEFT)
         self._create_tooltip(cb_cfr, "VFR(가변 프레임) → CFR(고정 프레임) 변환\n편집 프로그램 호환성 향상")
+
+        # Row 3: Crop
+        row3 = ttk.Frame(frame)
+        row3.pack(fill=tk.X)
+        cb_crop = ttk.Checkbutton(row3, text="Crop", variable=self.crop_var, command=self.on_option_change)
+        cb_crop.pack(side=tk.LEFT)
+        ttk.Label(row3, text="W").pack(side=tk.LEFT, padx=(2, 0))
+        crop_w_entry = ttk.Entry(row3, textvariable=self.crop_w_var, width=2)
+        crop_w_entry.pack(side=tk.LEFT)
+        ttk.Label(row3, text="H").pack(side=tk.LEFT, padx=(2, 0))
+        crop_h_entry = ttk.Entry(row3, textvariable=self.crop_h_var, width=2)
+        crop_h_entry.pack(side=tk.LEFT)
+        ttk.Label(row3, text="Sx").pack(side=tk.LEFT, padx=(2, 0))
+        crop_sx_entry = ttk.Entry(row3, textvariable=self.crop_sx_var, width=4)
+        crop_sx_entry.pack(side=tk.LEFT)
+        ttk.Label(row3, text="Sy").pack(side=tk.LEFT, padx=(2, 0))
+        crop_sy_entry = ttk.Entry(row3, textvariable=self.crop_sy_var, width=4)
+        crop_sy_entry.pack(side=tk.LEFT)
+        self._create_tooltip(cb_crop, "지정한 가로:세로 비율로 화면 잘라내기")
+        self._create_tooltip(crop_w_entry, "크롭 가로 비율 (예: 9)")
+        self._create_tooltip(crop_h_entry, "크롭 세로 비율 (예: 16)")
+        self._create_tooltip(crop_sx_entry, "크롭 시작 가로 위치(픽셀)\n비워두면 가운데 자동 정렬")
+        self._create_tooltip(crop_sy_entry, "크롭 시작 세로 위치(픽셀)\n비워두면 가운데 자동 정렬")
 
     def setup_range_options(self, parent):
         """구간 설정 UI — C++ 구간 그룹박스 대응"""
@@ -1154,6 +1192,14 @@ class VidGadgetApp:
         print(self.process_kind)
         self.update_command()
 
+    @staticmethod
+    def _parse_int(text: str):
+        """정수 입력 파싱 — 비었거나 잘못된 값이면 None"""
+        try:
+            return int(text.strip())
+        except (AttributeError, ValueError):
+            return None
+
     def get_settings(self) -> dict:
         """현재 설정값들을 딕셔너리로 반환"""
         # 파일 목록
@@ -1182,6 +1228,11 @@ class VidGadgetApp:
             "p1080": self.p1080_var.get(),
             "bit10": self.bit10_var.get(),
             "cfr": self.cfr_var.get(),
+            "crop": self.crop_var.get(),
+            "crop_w": self._parse_int(self.crop_w_var.get()),
+            "crop_h": self._parse_int(self.crop_h_var.get()),
+            "crop_x": self._parse_int(self.crop_sx_var.get()),
+            "crop_y": self._parse_int(self.crop_sy_var.get()),
             "quality_type": self.quality_type.get(),
             "video_sample": int(self.video_sample_var.get() or 3000),
             "video_quant": int(self.video_quant_var.get() or 20),
