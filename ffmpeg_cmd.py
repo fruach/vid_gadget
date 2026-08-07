@@ -67,6 +67,7 @@ class FFmpegCommandBuilder:
         self.media_info = media_info
         self.format_dest = FORMAT_VIDEO
         self._normalization_output_file = None
+        self.extract_audio_outputs = []
         # range_copy는 range가 활성일 때만 유효 (C++ CmdGet 동작과 일치)
         self._range_copy = self.settings.get("range", False) and self.settings.get("range_copy", False)
 
@@ -133,23 +134,44 @@ class FFmpegCommandBuilder:
         name, _ = divide_name(input_file)
         range_cmd = self._get_range_command()
         outputs = []
+        temp_dir = self.settings.get("extract_audio_temp_dir")
 
         for i, track in enumerate(self.media_info.audio_tracks):
-            filename_parts = [name, f"audio{i + 1:02d}"]
+            filename_parts = [name, f"a{i + 1}"]
+            title = ""
             if track.title:
-                title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", track.title).strip(" .")
+                title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", track.title).strip(" .")[:8]
+            metadata_parts = []
+            if track.bitrate:
+                metadata_parts.append(f"{track.bitrate}k")
+            if track.channel:
+                metadata_parts.append(f"{track.channel}ch")
+            if track.lang_name:
+                metadata_parts.append(track.lang_name.lower())
+
+            extension = track.extension.lower()
+            suffix = f".{'.'.join(metadata_parts + [extension])}"
+            if title:
+                prefix = ".".join(filename_parts)
+                max_title_lengths = [
+                    254 - len(prefix) - len(suffix) - 1,
+                    250 - len(os.path.basename(prefix)) - len(suffix) - 1,
+                ]
+                if temp_dir:
+                    temp_prefix = os.path.join(temp_dir, os.path.basename(prefix))
+                    max_title_lengths.append(254 - len(temp_prefix) - len(suffix) - 1)
+                max_title_length = min(max_title_lengths)
+                title = title[:max(0, max_title_length)].rstrip(" .")
                 if title:
                     filename_parts.append(title)
-            if track.bitrate:
-                filename_parts.append(f"{track.bitrate}kbps")
-            if track.channel:
-                filename_parts.append(f"{track.channel}ch")
-            if track.lang_name:
-                filename_parts.append(track.lang_name.lower())
 
-            output_file = self._get_available_output_file(
-                f"{'.'.join(filename_parts)}.{track.extension.lower()}"
+            final_output_file = self._get_available_output_file(
+                f"{'.'.join(filename_parts)}{suffix}"
             )
+            output_file = final_output_file
+            if temp_dir:
+                output_file = os.path.join(temp_dir, os.path.basename(final_output_file))
+            self.extract_audio_outputs.append((output_file, final_output_file))
             outputs.append(
                 f'{range_cmd["start2"]} {range_cmd["end"]} '
                 f'-map 0:a:{i} -vn -c:a copy "{output_file}"'

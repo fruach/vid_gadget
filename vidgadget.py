@@ -16,6 +16,8 @@ import sys
 import json
 import re
 import importlib.util
+import shutil
+import tempfile
 
 _VERSION_STR = "1.44"
 _BUILD_DATE_STR = "2026-06-29"
@@ -227,7 +229,7 @@ class VidGadgetApp:
             test_files = [
                 # r"D:\Dreams.mp4",
                 # r"D:\down-c.flac",
-                r"d:\you.wmv",
+                # r"d:\ready.mkv",
             ]
             for test_file in test_files:
                 if os.path.isfile(test_file):
@@ -1620,6 +1622,44 @@ class VidGadgetApp:
                 # 자막 추출 시 자막 트랙이 없으면 건너뛰기
                 if process_kind == PROC_KIND_EXTRACT_SUB and media_info.sub_count == 0:
                     skipped_count += 1
+                    continue
+
+                if process_kind == PROC_KIND_EXTRACT_AUDIO:
+                    with tempfile.TemporaryDirectory(prefix="vidgadget_audio_") as temp_dir:
+                        extract_settings = dict(settings)
+                        extract_settings["extract_audio_temp_dir"] = temp_dir
+                        builder = FFmpegCommandBuilder(extract_settings, media_info)
+                        cmd = builder.build_command(filename)
+
+                        self.root.after(
+                            0,
+                            lambda f=filename, current=current_loop, total=loop_total: self._set_status(
+                                self._format_file_status(process_kind, "오디오 추출 중", f, current, total)
+                            ),
+                        )
+                        returncode = self._run_cmd(cmd)
+
+                        if returncode == 0 and not self.stop_process:
+                            moved_files = []
+                            try:
+                                for temp_file, output_file in builder.extract_audio_outputs:
+                                    if not os.path.isfile(temp_file) or os.path.getsize(temp_file) == 0:
+                                        raise RuntimeError(f"추출 파일이 없거나 비어 있습니다: {temp_file}")
+
+                                for temp_file, output_file in builder.extract_audio_outputs:
+                                    moved_files.append(output_file)
+                                    shutil.move(temp_file, output_file)
+                                completed_count += 1
+                            except Exception as e:
+                                for output_file in moved_files:
+                                    if os.path.isfile(output_file):
+                                        os.remove(output_file)
+                                print(f"Error: {e}")
+                                failed_count += 1
+                                status_text = "오류"
+                        elif not self.stop_process:
+                            failed_count += 1
+                            status_text = "오류"
                     continue
 
                 # 명령어 생성

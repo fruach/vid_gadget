@@ -10,10 +10,12 @@ FFmpeg 기반 비디오/오디오 변환 GUI 도구
 - **오디오 변환**: MP3, AAC, OGG, OPUS, WAV, FLAC 등
 - **추출**: 동영상에서 영상만, 소리만, 자막만 추출
 - **합치기**: 여러 동영상 합치기, 영상/사진+소리 합치기
-- **오디오 도구**: Normalization, 태그/메타데이터 삭제
+- **오디오 도구**: Normalization(앞뒤 무음 정리 포함), 태그/메타데이터 삭제
 - **구간 편집**: 특정 구간만 추출
+- **화면 자르기(Crop)**: 원하는 가로:세로 비율(예: 9:16)로 잘라내기, 시작 좌표 생략 시 가운데 자동 정렬
 - **GPU 가속**: NVIDIA NVENC 지원
 - **해상도/프레임 처리**: 720p, 1080p, VFR 감지 및 CFR 변환 등
+- **음성 인식/자막 변환** (`tools/stt.py`, 별도 CLI): WhisperX·CrisperWhisper 로컬 모델 또는 Google/OpenAI API로 자막 생성, SRT/VTT/SBV/LRC/TXT 형식 상호 변환, 가사 파일 싱크
 
 ## 요구사항
 
