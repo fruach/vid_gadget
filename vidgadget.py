@@ -281,6 +281,13 @@ class VidGadgetApp:
             if value is not None:
                 var.set(str(value))
 
+        # GPU 옵션 복원
+        for key, var in (("gpu", self.gpu_var), ("gpu_compat", self.gpu_compat_var)):
+            value = cfg.get(key)
+            if value is not None:
+                var.set(bool(value))
+        self.on_gpu_check()  # GPU 해제 시 호환모드 체크박스 비활성화 동기화
+
     def save_geometry(self):
         """현재 창 위치/크기 저장"""
         if self.root.state() == "iconic":
@@ -306,6 +313,10 @@ class VidGadgetApp:
         # 크롭 비율 최근 사용값 저장
         cfg["crop_w"] = self.crop_w_var.get()
         cfg["crop_h"] = self.crop_h_var.get()
+
+        # GPU 옵션 저장
+        cfg["gpu"] = self.gpu_var.get()
+        cfg["gpu_compat"] = self.gpu_compat_var.get()
 
         with open(self._config_path(), "w") as f:
             json.dump(cfg, f)
